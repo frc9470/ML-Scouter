@@ -1,0 +1,6 @@
+# Model related
+*.pt
+*.mp4
+
+# Dev environment related
+.vscode/
