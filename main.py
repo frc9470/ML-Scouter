@@ -153,12 +153,17 @@ def main():
     # --- PHASE II: Model Initialization ---
     # Load custom Roboflow models if they exist, otherwise fallback to standard YOLOv8n
     try:
-        fuel_model = YOLO('fuel_model.pt')
-        robot_model = YOLO('robot_model.pt')
+        fuel_model = YOLO('fuel_model_old.pt')
     except Exception:
-        print("\n[WARNING] Custom 'fuel_model.pt' or 'robot_model.pt' not found.")
+        print("\n[WARNING] Custom 'fuel_model.pt' not found.")
         print("Falling back to standard YOLOv8n for prototype demonstration.")
         fuel_model = YOLO('yolov8n.pt')
+
+    try:
+        robot_model = YOLO('robot_model.pt')
+    except Exception:
+        print("\n[WARNING] Custom 'robot_model.pt' not found.")
+        print("Falling back to standard YOLOv8n for prototype demonstration.")
         robot_model = YOLO('yolov8n.pt')
 
     # Data structures for tracking and scoring

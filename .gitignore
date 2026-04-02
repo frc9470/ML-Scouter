@@ -1,5 +1,6 @@
 # Model related
 *.pt
+*.tflite
 *.mp4
 
 # Dev environment related
