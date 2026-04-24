@@ -136,7 +136,8 @@ def main():
             if len(roi_vertices) > 2:
                 # Close the shape visually
                 cv2.line(display_frame, roi_vertices[-1], roi_vertices[0], (0, 255, 255), 2)
-                
+        
+        # display_frame = resize_to_fit(display_frame, screen_w, screen_h)
         cv2.imshow(window_name, display_frame)
         key = cv2.waitKey(1) & 0xFF
         
@@ -153,18 +154,18 @@ def main():
     # --- PHASE II: Model Initialization ---
     # Load custom Roboflow models if they exist, otherwise fallback to standard YOLOv8n
     try:
-        fuel_model = YOLO('fuel_model_old.pt')
+        fuel_model = YOLO('fuel_best.pt')
     except Exception:
-        print("\n[WARNING] Custom 'fuel_model.pt' not found.")
+        print("\n[WARNING] Custom 'fuel_model.tflite' or 'robot_model.tflite' not found.")
         print("Falling back to standard YOLOv8n for prototype demonstration.")
         fuel_model = YOLO('yolov8n.pt')
-
+    
     try:
-        robot_model = YOLO('robot_model.pt')
+        robot_model = YOLO('runs_gpu/robot_seg/weights/best.pt')
     except Exception:
-        print("\n[WARNING] Custom 'robot_model.pt' not found.")
+        print("\n[WARNING] Custom robot model not found.")
         print("Falling back to standard YOLOv8n for prototype demonstration.")
-        robot_model = YOLO('yolov8n.pt')
+        fuel_model = YOLO('yolov8n.pt')
 
     # Data structures for tracking and scoring
     fuel_history = defaultdict(list)
@@ -196,14 +197,19 @@ def main():
 
         # 1. Run inference and tracking on FUEL
         # (For fallback yolov8n, classes=[32] filters for sports balls)
-        fuel_results = fuel_model.track(frame, persist=True, verbose=False, classes=[32] if fuel_model.model_name == 'yolov8n.yaml' else None)
+        fuel_results = fuel_model.track(
+            frame, persist=True, verbose=False, imgsz=320, classes=[32] if fuel_model.model_name == 'yolov8n.yaml' else None,
+        )
         
         # 2. Run inference and tracking on Robots
         # (For fallback yolov8n, classes=[0] filters for people as a stand-in for robots)
-        robot_results = robot_model.track(frame, persist=True, verbose=False, classes=[0] if robot_model.model_name == 'yolov8n.yaml' else None)
+        robot_results = robot_model.track(
+            frame, persist=True, verbose=False, imgsz=320, classes=[0] if robot_model.model_name == 'yolov8n.yaml' else None,
+        )
 
         # --- Process Robots ---
         if robot_results[0].boxes.id is not None:
+            print(robot_results[0].boxes.id)
             robot_boxes = robot_results[0].boxes.xyxy.cpu().numpy()
             robot_ids = robot_results[0].boxes.id.cpu().numpy().astype(int)
             
@@ -244,6 +250,10 @@ def main():
                 if f_id not in airborne_fuel_ids:
                     if is_airborne(fuel_history[f_id]):
                         airborne_fuel_ids.add(f_id)
+
+                # Draw Red Box for FUEL ( Regardless of airborne status)
+                color = (0, 0, 255)
+                cv2.rectangle(display_frame, (fx1, fy1), (fx2, fy2), color, 2)
                 
                 # Only process FUEL we consider airborne
                 if f_id in airborne_fuel_ids:
