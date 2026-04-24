@@ -3,6 +3,7 @@
 *.tflite
 *.mp4
 runs_gpu/*
+runs/*
 
 # Dev environment related
 .vscode/

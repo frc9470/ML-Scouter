@@ -25,12 +25,22 @@ class State:
     final_team_scores = defaultdict(int)
     video_path = "match_video.mp4"
 
+import argparse
+
+parser = argparse.ArgumentParser(description="ML-based shot counter for FRC REBUILT")
+parser.add_argument("--model", default="best.pt", help="Path to the YOLO model")
+parser.add_argument("--video", default="match_video.mp4", help="Path to the match video")
+
+args = parser.parse_args()
+
+State.video_path = args.video
+
 # Initialize Unified Model
 try:
     # Replace with the path to your new unified model
-    unified_model = YOLO('unified.pt') 
+    unified_model = YOLO(args.model) 
 except Exception:
-    print("ERROR: Could not load unified model, defaulting to YOLOv11.")
+    print(f"ERROR: Could not load unified model ('{args.model}'). Defaulting to YOLOv11n.")
     unified_model = YOLO('yolov11n.pt')
 
 # --- KINEMATIC HELPERS ---
