@@ -24,16 +24,13 @@ class State:
     final_team_scores = defaultdict(int)
     video_path = "match_video.mp4"
 
-# Initialize Models
+# Initialize Unified Model
 try:
-    fuel_model = YOLO('fuel_best.pt')
+    # Replace with the path to your new unified model
+    unified_model = YOLO('unified.pt') 
 except Exception:
-    fuel_model = YOLO('yolov8n.pt')
-
-try:
-    robot_model = YOLO('runs_gpu/robot_seg/weights/best.pt')
-except Exception:
-    robot_model = YOLO('yolov8n.pt')
+    print("ERROR: Could not load unified model, defaulting to YOLOv11.")
+    unified_model = YOLO('yolov11n.pt')
 
 # --- KINEMATIC HELPERS ---
 def is_airborne(history, min_frames=3, velocity_threshold=2.0):
@@ -146,67 +143,80 @@ def process_video_task():
         if State.roi_poly is not None:
             cv2.polylines(display_frame, [State.roi_poly], True, (255, 255, 255), 2)
 
-        fuel_results = fuel_model.track(
-            frame, persist=True, verbose=False, imgsz=320, classes=[32] if fuel_model.model_name == 'yolov8n.yaml' else None,
-            device = "0"
+        # Single inference call for unified model
+        results = unified_model.track(
+            frame, persist=True, verbose=False, imgsz=320, device="0"
         )
-        robot_results = robot_model.track(
-            frame, persist=True, verbose=False, imgsz=320, classes=[0] if robot_model.model_name == 'yolov8n.yaml' else None,
-            device = "0"
-        )
+        
+        # Determine class indices dynamically
+        # If using yolov8n fallback: 0 is person (robot), 32 is sports ball (fuel)
+        robot_cls = 0 if unified_model.model_name == 'yolov8n.yaml' else next((k for k, v in unified_model.names.items() if v == 'robot'), 0)
+        fuel_cls = 32 if unified_model.model_name == 'yolov8n.yaml' else next((k for k, v in unified_model.names.items() if v == 'fuel'), 1)
 
-        if robot_results[0].boxes.id is not None:
-            robot_boxes = robot_results[0].boxes.xyxy.cpu().numpy()
-            robot_ids = robot_results[0].boxes.id.cpu().numpy().astype(int)
-            for box, r_id in zip(robot_boxes, robot_ids):
-                rx1, ry1, rx2, ry2 = map(int, box)
-                robot_history[r_id].append({'frame': frame_count, 'bbox': (rx1, ry1, rx2, ry2)})
+        robot_boxes_list, robot_ids_list = [], []
+        fuel_boxes_list, fuel_ids_list = [], []
+
+        if results[0].boxes.id is not None:
+            boxes = results[0].boxes.xyxy.cpu().numpy()
+            ids = results[0].boxes.id.cpu().numpy().astype(int)
+            classes = results[0].boxes.cls.cpu().numpy().astype(int)
+            
+            for b, t_id, c in zip(boxes, ids, classes):
+                if c == robot_cls:
+                    robot_boxes_list.append(b)
+                    robot_ids_list.append(t_id)
+                elif c == fuel_cls:
+                    fuel_boxes_list.append(b)
+                    fuel_ids_list.append(t_id)
+
+        # Process Robots
+        for box, r_id in zip(robot_boxes_list, robot_ids_list):
+            rx1, ry1, rx2, ry2 = map(int, box)
+            robot_history[r_id].append({'frame': frame_count, 'bbox': (rx1, ry1, rx2, ry2)})
+            
+            if r_id not in State.robot_crops or frame_count % 30 == 0:
+                crop = frame[max(0, ry1-10):ry2+10, max(0, rx1-10):rx2+10]
+                if crop.size > 0:
+                    State.robot_crops[r_id] = crop
+
+            cv2.rectangle(display_frame, (rx1, ry1), (rx2, ry2), (128, 0, 128), 3)
+            cv2.putText(display_frame, f"Robot {r_id}", (rx1, ry1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 0, 128), 2)
+
+        # Process FUEL
+        for box, f_id in zip(fuel_boxes_list, fuel_ids_list):
+            fx1, fy1, fx2, fy2 = map(int, box)
+            cx = int((fx1 + fx2) / 2)
+            cy = int((fy1 + fy2) / 2)
+            fuel_history[f_id].append({'frame': frame_count, 'x': cx, 'y': cy, 'bbox': (fx1, fy1, fx2, fy2)})
+            
+            if f_id not in airborne_fuel_ids:
+                if is_airborne(fuel_history[f_id]):
+                    airborne_fuel_ids.add(f_id)
+
+            color = (0, 0, 255)
+            cv2.rectangle(display_frame, (fx1, fy1), (fx2, fy2), color, 2)
+            
+            if f_id in airborne_fuel_ids:
+                color = (255, 0, 0)
+                status_text = f"FUEL {f_id}"
                 
-                if r_id not in State.robot_crops or frame_count % 30 == 0:
-                    crop = frame[max(0, ry1-10):ry2+10, max(0, rx1-10):rx2+10]
-                    if crop.size > 0:
-                        State.robot_crops[r_id] = crop
+                if f_id not in scored_fuel_ids and State.roi_poly is not None:
+                    inside = cv2.pointPolygonTest(State.roi_poly, (cx, cy), False) >= 0
+                    if inside:
+                        scored_fuel_ids.add(f_id)
+                        State.total_scored_fuel += 1
+                        source_robot_id = calculate_trajectory_and_attribute(f_id, fuel_history[f_id], robot_history)
+                        if source_robot_id is not None:
+                            State.robot_scores[source_robot_id] += 1
 
-                cv2.rectangle(display_frame, (rx1, ry1), (rx2, ry2), (128, 0, 128), 3)
-                cv2.putText(display_frame, f"Robot {r_id}", (rx1, ry1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 0, 128), 2)
-
-        if fuel_results[0].boxes.id is not None:
-            fuel_boxes = fuel_results[0].boxes.xyxy.cpu().numpy()
-            fuel_ids = fuel_results[0].boxes.id.cpu().numpy().astype(int)
-            for box, f_id in zip(fuel_boxes, fuel_ids):
-                fx1, fy1, fx2, fy2 = map(int, box)
-                cx = int((fx1 + fx2) / 2)
-                cy = int((fy1 + fy2) / 2)
-                fuel_history[f_id].append({'frame': frame_count, 'x': cx, 'y': cy, 'bbox': (fx1, fy1, fx2, fy2)})
-                
-                if f_id not in airborne_fuel_ids:
-                    if is_airborne(fuel_history[f_id]):
-                        airborne_fuel_ids.add(f_id)
-
-                color = (0, 0, 255)
-                cv2.rectangle(display_frame, (fx1, fy1), (fx2, fy2), color, 2)
-                
-                if f_id in airborne_fuel_ids:
-                    color = (255, 0, 0)
-                    status_text = f"FUEL {f_id}"
+                if f_id in scored_fuel_ids:
+                    color = (0, 255, 0)
+                    status_text = "SCORED"
                     
-                    if f_id not in scored_fuel_ids and State.roi_poly is not None:
-                        inside = cv2.pointPolygonTest(State.roi_poly, (cx, cy), False) >= 0
-                        if inside:
-                            scored_fuel_ids.add(f_id)
-                            State.total_scored_fuel += 1
-                            source_robot_id = calculate_trajectory_and_attribute(f_id, fuel_history[f_id], robot_history)
-                            if source_robot_id is not None:
-                                State.robot_scores[source_robot_id] += 1
-
-                    if f_id in scored_fuel_ids:
-                        color = (0, 255, 0)
-                        status_text = "SCORED"
-                        
-                    cv2.rectangle(display_frame, (fx1, fy1), (fx2, fy2), color, 2)
-                    cv2.putText(display_frame, status_text, (fx1, fy1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                    pts = np.array([[pt['x'], pt['y']] for pt in fuel_history[f_id]], np.int32)
-                    cv2.polylines(display_frame, [pts], False, color, 1)
+                cv2.rectangle(display_frame, (fx1, fy1), (fx2, fy2), color, 2)
+                cv2.putText(display_frame, status_text, (fx1, fy1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                pts = np.array([[pt['x'], pt['y']] for pt in fuel_history[f_id]], np.int32)
+                cv2.polylines(display_frame, [pts], False, color, 1)
 
         cv2.putText(display_frame, f"Scored FUEL: {State.total_scored_fuel}", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
 
