@@ -62,7 +62,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 if(i === 0) ctx.moveTo(x, y);
                 else ctx.lineTo(x, y);
                 
-                // Draw circle marker
                 ctx.fillStyle = '#ff0000';
                 ctx.beginPath();
                 ctx.arc(x, y, 4, 0, Math.PI * 2);
@@ -93,10 +92,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }).then(res => res.json()).then(data => {
             if(data.success) {
                 document.getElementById('phase-roi').classList.remove('active');
-                document.getElementById('phase-stream').classList.add('active');
-                
-                // Point img src to stream endpoint
-                document.getElementById('video-stream').src = '/video_feed';
+                document.getElementById('phase-processing').classList.add('active');
                 pollStatus();
             }
         });
@@ -108,22 +104,37 @@ document.addEventListener('DOMContentLoaded', () => {
             fetch('/api/status')
                 .then(res => res.json())
                 .then(data => {
+                    // Update progress bar
+                    const percent = data.total_frames > 0 ? Math.min(100, Math.round((data.progress / data.total_frames) * 100)) : 0;
+                    document.getElementById('progress-bar').style.width = percent + '%';
+                    document.getElementById('progress-text').innerText = percent + '%';
+
                     if(data.is_finished) {
                         clearInterval(interval);
-                        showResults();
+                        
+                        document.getElementById('phase-processing').classList.remove('active');
+                        document.getElementById('phase-playback').classList.add('active');
+                        
+                        document.getElementById('video-source').src = '/static/output.mp4?t=' + new Date().getTime();
+                        document.getElementById('video-player').load();
                     }
                 });
-        }, 2000);
+        }, 1000); // Check every second
     }
 
-    // 4. Show Robot Attribution Screen
+    // 4. Continue to attribution
+    document.getElementById('btn-continue-attribution').addEventListener('click', () => {
+        showResults();
+    });
+
+    // 5. Show Robot Attribution Screen
     function showResults() {
+        document.getElementById('phase-playback').classList.remove('active');
+        document.getElementById('phase-results').classList.add('active');
+        
         fetch('/api/results')
             .then(res => res.json())
             .then(data => {
-                document.getElementById('phase-stream').classList.remove('active');
-                document.getElementById('phase-results').classList.add('active');
-                
                 const grid = document.getElementById('robot-grid');
                 Object.keys(data.crops).forEach(r_id => {
                     const div = document.createElement('div');
@@ -139,7 +150,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
     }
 
-    // 5. Submit Scores and Show Final Report
+    // 6. Submit Scores and Show Final Report
     document.getElementById('btn-submit-scores').addEventListener('click', () => {
         const inputs = document.querySelectorAll('.input-field');
         const mapping = {};

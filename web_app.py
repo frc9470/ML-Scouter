@@ -1,6 +1,7 @@
 import os
 import cv2
 import base64
+import threading
 import numpy as np
 from flask import Flask, render_template, request, Response, jsonify
 from collections import defaultdict
@@ -15,6 +16,8 @@ class State:
     roi_poly = None
     is_processing = False
     is_finished = False
+    progress = 0
+    total_frames = 1
     robot_crops = {}
     robot_scores = defaultdict(int)
     total_scored_fuel = 0
@@ -103,13 +106,27 @@ def api_set_roi():
     State.roi_poly = np.array(points, np.int32).reshape((-1, 1, 2))
     State.is_processing = True
     State.is_finished = False
+    State.progress = 0
     State.robot_crops = {}
     State.robot_scores = defaultdict(int)
     State.total_scored_fuel = 0
+    
+    # Start background processing thread
+    threading.Thread(target=process_video_task).start()
     return jsonify({"success": True})
 
-def generate_frames():
+def process_video_task():
     cap = cv2.VideoCapture(State.video_path if os.path.exists(State.video_path) else 0)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    State.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if State.total_frames <= 0: State.total_frames = 1
+    
+    # Write directly to mp4 using avc1 codec (H264)
+    out_path = 'static/output.mp4'
+    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+    out = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
     
     fuel_history = defaultdict(list)
     robot_history = defaultdict(list)
@@ -117,22 +134,26 @@ def generate_frames():
     scored_fuel_ids = set()
     frame_count = 0
     
-    while State.is_processing:
+    while True:
         ret, frame = cap.read()
         if not ret:
-            State.is_processing = False
-            State.is_finished = True
             break
             
         frame_count += 1
+        State.progress = frame_count
         display_frame = frame.copy()
 
         if State.roi_poly is not None:
             cv2.polylines(display_frame, [State.roi_poly], True, (255, 255, 255), 2)
 
-        # Ensure we pass imgsz to keep performance optimal
-        fuel_results = fuel_model.track(frame, persist=True, verbose=False, imgsz=320, classes=[32] if fuel_model.model_name == 'yolov8n.yaml' else None)
-        robot_results = robot_model.track(frame, persist=True, verbose=False, imgsz=320, classes=[0] if robot_model.model_name == 'yolov8n.yaml' else None)
+        fuel_results = fuel_model.track(
+            frame, persist=True, verbose=False, imgsz=320, classes=[32] if fuel_model.model_name == 'yolov8n.yaml' else None,
+            device = "0"
+        )
+        robot_results = robot_model.track(
+            frame, persist=True, verbose=False, imgsz=320, classes=[0] if robot_model.model_name == 'yolov8n.yaml' else None,
+            device = "0"
+        )
 
         if robot_results[0].boxes.id is not None:
             robot_boxes = robot_results[0].boxes.xyxy.cpu().numpy()
@@ -189,22 +210,21 @@ def generate_frames():
 
         cv2.putText(display_frame, f"Scored FUEL: {State.total_scored_fuel}", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
 
-        ret, buffer = cv2.imencode('.jpg', display_frame)
-        frame_bytes = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        out.write(display_frame)
 
     cap.release()
-
-@app.route('/video_feed')
-def video_feed():
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    out.release()
+    
+    State.is_processing = False
+    State.is_finished = True
 
 @app.route('/api/status')
 def api_status():
     return jsonify({
         "is_processing": State.is_processing,
         "is_finished": State.is_finished,
+        "progress": State.progress,
+        "total_frames": State.total_frames,
         "total_scored": State.total_scored_fuel
     })
 
@@ -246,5 +266,4 @@ def api_submit_attribution():
     })
 
 if __name__ == '__main__':
-    # Listen on all network interfaces to allow remote access
     app.run(host='0.0.0.0', port=5000, debug=True)
