@@ -107,7 +107,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     // Update progress bar
                     const percent = data.total_frames > 0 ? Math.min(100, Math.round((data.progress / data.total_frames) * 100)) : 0;
                     document.getElementById('progress-bar').style.width = percent + '%';
-                    document.getElementById('progress-text').innerText = percent + '%';
+                    document.getElementById('progress-text').innerText
+                        = `${percent}% (${data.progress}/${data.total_frames})`;
+                        
+                    // Update live FUEL count
+                    if (data.current_fuel_count !== undefined && document.getElementById('live-fuel-count')) {
+                        document.getElementById('live-fuel-count').innerText = data.current_fuel_count;
+                    }
 
                     if(data.is_finished) {
                         clearInterval(interval);

@@ -18,6 +18,7 @@ class State:
     is_finished = False
     progress = 0
     total_frames = 1
+    current_fuel_count = 0
     robot_crops = {}
     robot_scores = defaultdict(int)
     total_scored_fuel = 0
@@ -104,6 +105,7 @@ def api_set_roi():
     State.is_processing = True
     State.is_finished = False
     State.progress = 0
+    State.current_fuel_count = 0
     State.robot_crops = {}
     State.robot_scores = defaultdict(int)
     State.total_scored_fuel = 0
@@ -168,6 +170,8 @@ def process_video_task():
                 elif c == fuel_cls:
                     fuel_boxes_list.append(b)
                     fuel_ids_list.append(t_id)
+
+        State.current_fuel_count = len(fuel_boxes_list)
 
         # Process Robots
         for box, r_id in zip(robot_boxes_list, robot_ids_list):
@@ -235,7 +239,8 @@ def api_status():
         "is_finished": State.is_finished,
         "progress": State.progress,
         "total_frames": State.total_frames,
-        "total_scored": State.total_scored_fuel
+        "total_scored": State.total_scored_fuel,
+        "current_fuel_count": State.current_fuel_count
     })
 
 @app.route('/api/results')
