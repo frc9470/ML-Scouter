@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FRC AI Scouter</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="background-glow"></div>
+    <div class="container">
+        <header>
+            <h1>FRC <span>AI</span> Scouter</h1>
+            <p>Advanced Kinematic Tracking & Scoring Pipeline</p>
+        </header>
+
+        <!-- Phase 1: ROI Selection -->
+        <div id="phase-roi" class="card active">
+            <h2>1. Define HUB Funnel ROI</h2>
+            <p>Click on the video frame to trace the hexagonal HUB funnel. You need at least 3 points to create a valid detection zone.</p>
+            
+            <div class="canvas-container">
+                <img id="first-frame" src="" alt="First Frame" />
+                <canvas id="roi-canvas"></canvas>
+            </div>
+            
+            <div class="actions">
+                <button id="btn-clear" class="btn secondary">Clear Points</button>
+                <button id="btn-start" class="btn primary" disabled>Start Match Analysis</button>
+            </div>
+        </div>
+
+        <!-- Phase 2: Playback Stream -->
+        <div id="phase-stream" class="card">
+            <h2>2. Live Match Analysis</h2>
+            <div class="stream-container">
+                <img id="video-stream" src="" alt="Video Stream will appear here" />
+            </div>
+            <div class="stats-bar">
+                <div class="stat-box">
+                    <h3>System Status</h3>
+                    <p id="stream-status" class="pulse">Processing Frames on GPU...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Phase 3: Attribution -->
+        <div id="phase-results" class="card">
+            <h2>3. Score Attribution</h2>
+            <p>Match analysis complete! Identify the robots below to finalize scores.</p>
+            
+            <div id="robot-grid" class="grid">
+                <!-- Dynamically populated by JS -->
+            </div>
+            
+            <div class="actions">
+                <button id="btn-submit-scores" class="btn primary">Finalize Report</button>
+            </div>
+        </div>
+
+        <!-- Final Report -->
+        <div id="phase-final" class="card">
+            <h2>Final Match Report</h2>
+            <div id="final-scores-container"></div>
+            <br>
+            <div class="actions">
+                <button class="btn secondary" onclick="location.reload()">Start New Match</button>
+            </div>
+        </div>
+    </div>
+    <script src="/static/app.js"></script>
+</body>
+</html>
