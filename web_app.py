@@ -162,8 +162,8 @@ def process_video_task():
         
         # Determine class indices dynamically
         # If using yolov8n fallback: 0 is person (robot), 32 is sports ball (fuel)
-        robot_cls = 0 if unified_model.model_name == 'yolov8n.yaml' else next((k for k, v in unified_model.names.items() if v == 'robot'), 0)
-        fuel_cls = 32 if unified_model.model_name == 'yolov8n.yaml' else next((k for k, v in unified_model.names.items() if v == 'fuel'), 1)
+        robot_cls = 0 if unified_model.model_name == 'yolov8n.yaml' else next((k for k, v in unified_model.names.items() if v == 'robot'), 1)
+        fuel_cls = 32 if unified_model.model_name == 'yolov8n.yaml' else next((k for k, v in unified_model.names.items() if v == 'fuel'), 0)
 
         robot_boxes_list, robot_ids_list = [], []
         fuel_boxes_list, fuel_ids_list = [], []
