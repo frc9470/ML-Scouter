@@ -28,20 +28,34 @@ class State:
 import argparse
 
 parser = argparse.ArgumentParser(description="ML-based shot counter for FRC REBUILT")
-parser.add_argument("--model", default="best.pt", help="Path to the YOLO model")
+parser.add_argument("--model", default=None, help="Path to the unified YOLO model")
+parser.add_argument("--fuel-model", default=None, help="Path to the fuel YOLO model")
+parser.add_argument("--robot-model", default=None, help="Path to the robot YOLO model")
 parser.add_argument("--video", default="match_video.mp4", help="Path to the match video")
 
 args = parser.parse_args()
 
 State.video_path = args.video
 
-# Initialize Unified Model
-try:
-    # Replace with the path to your new unified model
-    unified_model = YOLO(args.model) 
-except Exception:
-    print(f"ERROR: Could not load unified model ('{args.model}'). Defaulting to YOLOv11n.")
-    unified_model = YOLO('yolov11n.pt')
+# Initialize Models
+unified_model = None
+fuel_model = None
+robot_model = None
+
+if args.fuel_model and args.robot_model:
+    try:
+        fuel_model = YOLO(args.fuel_model)
+        robot_model = YOLO(args.robot_model)
+    except Exception as e:
+        print(f"ERROR: Could not load individual fuel and robot models, defaulting to YOLOv11n: {e}")
+        unified_model = YOLO('yolov11n.pt')
+else:
+    model_path = args.model if args.model else "unified.pt"
+    try:
+        unified_model = YOLO(model_path) 
+    except Exception:
+        print(f"ERROR: Could not load unified model. Defaulting to YOLOv11n.")
+        unified_model = YOLO('yolov11n.pt')
 
 # --- KINEMATIC HELPERS ---
 def is_airborne(history, min_frames=3, velocity_threshold=2.0):
@@ -155,29 +169,48 @@ def process_video_task():
         if State.roi_poly is not None:
             cv2.polylines(display_frame, [State.roi_poly], True, (255, 255, 255), 2)
 
-        # Single inference call for unified model
-        results = unified_model.track(
-            frame, persist=True, verbose=False, imgsz=320, device="0"
-        )
-        
-        # Determine class indices dynamically
-        # If using yolov8n fallback: 0 is person (robot), 32 is sports ball (fuel)
-        robot_cls = 0 if unified_model.model_name == 'yolov8n.yaml' else next((k for k, v in unified_model.names.items() if v == 'robot'), 1)
-        fuel_cls = 32 if unified_model.model_name == 'yolov8n.yaml' else next((k for k, v in unified_model.names.items() if v == 'fuel'), 0)
-
         robot_boxes_list, robot_ids_list = [], []
         fuel_boxes_list, fuel_ids_list = [], []
 
-        if results[0].boxes.id is not None:
-            boxes = results[0].boxes.xyxy.cpu().numpy()
-            ids = results[0].boxes.id.cpu().numpy().astype(int)
-            classes = results[0].boxes.cls.cpu().numpy().astype(int)
+        if unified_model:
+            results = unified_model.track(
+                frame, persist=True, verbose=False, imgsz=320
+            )
             
-            for b, t_id, c in zip(boxes, ids, classes):
-                if c == robot_cls:
+            robot_cls = 0 if unified_model.model_name in ['yolov11n.yaml', 'yolov8n.yaml'] else next((k for k, v in unified_model.names.items() if v == 'robot'), 1)
+            fuel_cls = 32 if unified_model.model_name in ['yolov11n.yaml', 'yolov8n.yaml'] else next((k for k, v in unified_model.names.items() if v == 'fuel'), 0)
+
+            if results[0].boxes.id is not None:
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                ids = results[0].boxes.id.cpu().numpy().astype(int)
+                classes = results[0].boxes.cls.cpu().numpy().astype(int)
+                
+                for b, t_id, c in zip(boxes, ids, classes):
+                    if c == robot_cls:
+                        robot_boxes_list.append(b)
+                        robot_ids_list.append(t_id)
+                    elif c == fuel_cls:
+                        fuel_boxes_list.append(b)
+                        fuel_ids_list.append(t_id)
+        else:
+            fuel_results = fuel_model.track(
+                frame, persist=True, verbose=False, imgsz=320, classes=[32] if fuel_model.model_name in ['yolov11n.yaml', 'yolov8n.yaml'] else None
+            )
+            robot_results = robot_model.track(
+                frame, persist=True, verbose=False, imgsz=320, classes=[0] if robot_model.model_name in ['yolov11n.yaml', 'yolov8n.yaml'] else None
+            )
+            
+            if robot_results[0].boxes.id is not None:
+                boxes = robot_results[0].boxes.xyxy.cpu().numpy()
+                ids = robot_results[0].boxes.id.cpu().numpy().astype(int)
+                for b, t_id in zip(boxes, ids):
                     robot_boxes_list.append(b)
                     robot_ids_list.append(t_id)
-                elif c == fuel_cls:
+                    
+            if fuel_results[0].boxes.id is not None:
+                boxes = fuel_results[0].boxes.xyxy.cpu().numpy()
+                ids = fuel_results[0].boxes.id.cpu().numpy().astype(int)
+                for b, t_id in zip(boxes, ids):
                     fuel_boxes_list.append(b)
                     fuel_ids_list.append(t_id)
 
@@ -291,4 +324,4 @@ def api_submit_attribution():
     })
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=8000, debug=True)
