@@ -3,23 +3,63 @@ let imgNativeWidth = 0;
 let imgNativeHeight = 0;
 
 document.addEventListener('DOMContentLoaded', () => {
-    // 1. Fetch First Frame for ROI Drawing
-    fetch('/api/first_frame')
-        .then(res => res.json())
-        .then(data => {
-            if(data.image) {
-                const img = document.getElementById('first-frame');
-                img.src = data.image;
-                img.onload = () => {
-                    imgNativeWidth = img.naturalWidth;
-                    imgNativeHeight = img.naturalHeight;
-                    resizeCanvas();
-                }
-            }
-        });
-
     const canvas = document.getElementById('roi-canvas');
     const ctx = canvas.getContext('2d');
+    const startButton = document.getElementById('btn-start');
+    const sourceStatus = document.getElementById('source-status');
+    const frameStatus = document.getElementById('frame-status');
+    const frameSecondsInput = document.getElementById('roi-frame-seconds');
+    const frameError = document.getElementById('first-frame-error');
+
+    function clearRoi() {
+        points = [];
+        drawPoints();
+        startButton.disabled = true;
+    }
+
+    function setFrameError(message) {
+        frameError.textContent = message;
+        frameError.classList.add('active');
+    }
+
+    function clearFrameError() {
+        frameError.textContent = '';
+        frameError.classList.remove('active');
+    }
+
+    function setFirstFrame(image) {
+        clearFrameError();
+        const img = document.getElementById('first-frame');
+        img.src = image;
+        img.onload = () => {
+            imgNativeWidth = img.naturalWidth;
+            imgNativeHeight = img.naturalHeight;
+            resizeCanvas();
+        };
+    }
+
+    function setFrameSeconds(seconds) {
+        frameSecondsInput.value = Math.max(0, Number(seconds) || 0).toFixed(1);
+    }
+
+    function loadFirstFrame() {
+        fetch('/api/first_frame')
+        .then(res => res.json().then(data => ({ok: res.ok, data})))
+        .then(({ok, data}) => {
+            if (!ok) {
+                setFrameError(data.error || 'Could not load the first video frame.');
+                return;
+            }
+            if(data.image) {
+                setFrameSeconds(data.seconds || 0);
+                setFirstFrame(data.image);
+            }
+        })
+        .catch(() => {
+            setFrameError('Could not connect to the video frame endpoint.');
+        });
+    }
+    loadFirstFrame();
     
     function resizeCanvas() {
         const img = document.getElementById('first-frame');
@@ -30,6 +70,8 @@ document.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('resize', resizeCanvas);
 
     canvas.addEventListener('mousedown', (e) => {
+        if (!imgNativeWidth || !imgNativeHeight) return;
+
         const rect = canvas.getBoundingClientRect();
         const scaleX = imgNativeWidth / canvas.width;
         const scaleY = imgNativeHeight / canvas.height;
@@ -41,12 +83,14 @@ document.addEventListener('DOMContentLoaded', () => {
         drawPoints();
         
         if(points.length >= 3) {
-            document.getElementById('btn-start').disabled = false;
+            startButton.disabled = false;
         }
     });
 
     function drawPoints() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (!imgNativeWidth || !imgNativeHeight) return;
+
         const scaleX = canvas.width / imgNativeWidth;
         const scaleY = canvas.height / imgNativeHeight;
 
@@ -63,28 +107,119 @@ document.addEventListener('DOMContentLoaded', () => {
                 else ctx.lineTo(x, y);
                 
                 ctx.fillStyle = '#ff0000';
-                ctx.beginPath();
-                ctx.arc(x, y, 4, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.beginPath();
-                ctx.moveTo(x, y);
             });
-            
+
             if(points.length > 2) {
                 ctx.lineTo(points[0][0] * scaleX, points[0][1] * scaleY);
             }
             ctx.stroke();
+
+            points.forEach((pt) => {
+                const x = pt[0] * scaleX;
+                const y = pt[1] * scaleY;
+                ctx.beginPath();
+                ctx.arc(x, y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            });
         }
     }
 
     document.getElementById('btn-clear').addEventListener('click', () => {
-        points = [];
-        drawPoints();
-        document.getElementById('btn-start').disabled = true;
+        clearRoi();
+    });
+
+    function loadFrameAtSeconds(seconds) {
+        frameStatus.textContent = 'Loading ROI frame...';
+        frameStatus.className = 'source-status active';
+        document.getElementById('btn-load-frame').disabled = true;
+        startButton.disabled = true;
+
+        fetch('/api/frame_at', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({seconds})
+        })
+            .then(res => res.json().then(data => ({ok: res.ok, data})))
+            .then(({ok, data}) => {
+                if (!ok) {
+                    frameStatus.textContent = data.error || 'Could not load ROI frame.';
+                    frameStatus.className = 'source-status error';
+                    return;
+                }
+
+                setFrameSeconds(data.seconds);
+                clearRoi();
+                setFirstFrame(data.image);
+                frameStatus.textContent = `ROI frame loaded at ${Number(data.seconds).toFixed(1)}s.`;
+                frameStatus.className = 'source-status success';
+            })
+            .catch(() => {
+                frameStatus.textContent = 'Could not connect to the ROI frame endpoint.';
+                frameStatus.className = 'source-status error';
+            })
+            .finally(() => {
+                document.getElementById('btn-load-frame').disabled = false;
+            });
+    }
+
+    document.getElementById('btn-load-frame').addEventListener('click', () => {
+        loadFrameAtSeconds(Number(frameSecondsInput.value) || 0);
+    });
+
+    document.getElementById('btn-frame-back').addEventListener('click', () => {
+        loadFrameAtSeconds(Math.max(0, (Number(frameSecondsInput.value) || 0) - 5));
+    });
+
+    document.getElementById('btn-frame-forward').addEventListener('click', () => {
+        loadFrameAtSeconds((Number(frameSecondsInput.value) || 0) + 5);
+    });
+
+    document.getElementById('btn-load-youtube').addEventListener('click', () => {
+        const urlInput = document.getElementById('youtube-url');
+        const url = urlInput.value.trim();
+        if (!url) {
+            sourceStatus.textContent = 'Paste a YouTube URL first.';
+            sourceStatus.className = 'source-status error';
+            return;
+        }
+
+        sourceStatus.textContent = 'Downloading video...';
+        sourceStatus.className = 'source-status active';
+        document.getElementById('btn-load-youtube').disabled = true;
+        startButton.disabled = true;
+
+        fetch('/api/set_video_source', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({youtube_url: url})
+        })
+            .then(res => res.json().then(data => ({ok: res.ok, data})))
+            .then(({ok, data}) => {
+                if (!ok) {
+                    sourceStatus.textContent = data.error || 'Could not load YouTube video.';
+                    sourceStatus.className = 'source-status error';
+                    return;
+                }
+
+                sourceStatus.textContent = 'Video loaded. Pick an ROI frame or select the ROI on this frame.';
+                sourceStatus.className = 'source-status success';
+                frameStatus.textContent = 'Title card? Jump forward a few seconds, then load the ROI frame.';
+                frameStatus.className = 'source-status active';
+                setFrameSeconds(data.seconds || 0);
+                clearRoi();
+                setFirstFrame(data.image);
+            })
+            .catch(() => {
+                sourceStatus.textContent = 'Could not connect to the video source endpoint.';
+                sourceStatus.className = 'source-status error';
+            })
+            .finally(() => {
+                document.getElementById('btn-load-youtube').disabled = false;
+            });
     });
 
     // 2. Start Processing
-    document.getElementById('btn-start').addEventListener('click', () => {
+    startButton.addEventListener('click', () => {
         fetch('/api/set_roi', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},

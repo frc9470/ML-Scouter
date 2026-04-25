@@ -19,10 +19,25 @@
         <div id="phase-roi" class="card active">
             <h2>1. Define HUB Funnel ROI</h2>
             <p>Click on the video frame to trace the hexagonal HUB funnel. You need at least 3 points to create a valid detection zone.</p>
+
+            <div class="source-panel">
+                <input id="youtube-url" class="source-input" type="url" placeholder="Paste a YouTube match video URL" />
+                <button id="btn-load-youtube" class="btn secondary">Load YouTube Video</button>
+            </div>
+            <p id="source-status" class="source-status"></p>
+
+            <div class="frame-panel">
+                <button id="btn-frame-back" class="btn secondary" type="button">-5s</button>
+                <input id="roi-frame-seconds" class="frame-input" type="number" min="0" step="0.5" value="0" aria-label="ROI frame time in seconds" />
+                <button id="btn-load-frame" class="btn secondary" type="button">Load ROI Frame</button>
+                <button id="btn-frame-forward" class="btn secondary" type="button">+5s</button>
+            </div>
+            <p id="frame-status" class="source-status"></p>
             
             <div class="canvas-container">
                 <img id="first-frame" src="" alt="First Frame" />
                 <canvas id="roi-canvas"></canvas>
+                <div id="first-frame-error" class="frame-error"></div>
             </div>
             
             <div class="actions">

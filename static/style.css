@@ -97,6 +97,56 @@ h2 {
     margin: 1.5rem 0;
 }
 
+.source-panel {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 1.5rem;
+}
+
+.frame-panel {
+    display: flex;
+    gap: 0.75rem;
+    align-items: stretch;
+    margin-top: 1rem;
+}
+
+.source-input, .frame-input {
+    flex: 1;
+    min-width: 0;
+    padding: 0.75rem 1rem;
+    border-radius: 12px;
+    border: 1px solid var(--glass-border);
+    background: rgba(255,255,255,0.05);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 1rem;
+    box-sizing: border-box;
+}
+
+.frame-input {
+    flex: 0 1 130px;
+    text-align: center;
+}
+
+.source-input:focus, .frame-input:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+
+.source-status {
+    min-height: 1.25rem;
+    margin: 0.75rem 0 0 0;
+    color: var(--text-muted);
+}
+
+.source-status.error {
+    color: #f87171;
+}
+
+.source-status.success {
+    color: #34d399;
+}
+
 .canvas-container img, .stream-container img {
     width: 100%;
     height: auto;
@@ -110,6 +160,17 @@ canvas {
     width: 100%;
     height: 100%;
     cursor: crosshair;
+}
+
+.frame-error {
+    display: none;
+    padding: 2rem;
+    text-align: center;
+    color: var(--text-muted);
+}
+
+.frame-error.active {
+    display: block;
 }
 
 .actions {
@@ -155,6 +216,11 @@ canvas {
 
 .btn.secondary:hover {
     background: rgba(255,255,255,0.1);
+}
+
+.btn.secondary:disabled {
+    opacity: 0.5;
+    cursor: wait;
 }
 
 .stats-bar {
@@ -246,4 +312,19 @@ canvas {
 
 .score-row:last-child {
     border-bottom: none;
+}
+
+@media (max-width: 700px) {
+    .source-panel, .frame-panel {
+        flex-direction: column;
+    }
+
+    .frame-input {
+        flex: 1;
+        width: 100%;
+    }
+
+    .actions {
+        flex-direction: column;
+    }
 }

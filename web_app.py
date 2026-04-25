@@ -3,12 +3,15 @@ import cv2
 import base64
 import threading
 import numpy as np
-from flask import Flask, render_template, request, Response, jsonify
+import yt_dlp
+from flask import Flask, render_template, request, jsonify
 from collections import defaultdict
+from urllib.parse import urlparse
 from ultralytics import YOLO
 
 app = Flask(__name__)
 os.makedirs('static/crops', exist_ok=True)
+os.makedirs('static/downloads', exist_ok=True)
 
 # --- GLOBAL STATE ---
 class State:
@@ -24,6 +27,7 @@ class State:
     total_scored_fuel = 0
     final_team_scores = defaultdict(int)
     video_path = "match_video.mp4"
+    roi_frame_seconds = 0.0
 
 import argparse
 
@@ -33,9 +37,67 @@ parser.add_argument("--fuel-model", default=None, help="Path to the fuel YOLO mo
 parser.add_argument("--robot-model", default=None, help="Path to the robot YOLO model")
 parser.add_argument("--video", default="match_video.mp4", help="Path to the match video")
 
-args = parser.parse_args()
+args, _unknown_args = parser.parse_known_args()
 
 State.video_path = args.video
+
+def is_youtube_url(url):
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    return parsed.scheme in {"http", "https"} and (
+        host == "youtu.be" or host.endswith(".youtube.com") or host == "youtube.com"
+    )
+
+def download_youtube_video(url):
+    output_template = os.path.abspath("static/downloads/youtube_%(id)s.%(ext)s")
+    options = {
+        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "merge_output_format": "mp4",
+        "outtmpl": output_template,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+
+    with yt_dlp.YoutubeDL(options) as ydl:
+        info = ydl.extract_info(url, download=True)
+        downloaded_path = ydl.prepare_filename(info)
+        if not downloaded_path.endswith(".mp4"):
+            downloaded_path = os.path.splitext(downloaded_path)[0] + ".mp4"
+
+    if not os.path.exists(downloaded_path):
+        raise FileNotFoundError("Downloaded video file was not created")
+
+    return downloaded_path
+
+def get_video_info(video_path):
+    cap = cv2.VideoCapture(video_path if os.path.exists(video_path) else 0)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    cap.release()
+
+    duration = total_frames / fps if fps and total_frames > 0 else 0
+    return {
+        "fps": fps,
+        "total_frames": total_frames,
+        "duration": duration,
+    }
+
+def encode_frame_at(video_path, seconds=0):
+    cap = cv2.VideoCapture(video_path if os.path.exists(video_path) else 0)
+    if seconds > 0:
+        cap.set(cv2.CAP_PROP_POS_MSEC, seconds * 1000)
+
+    ret, frame = cap.read()
+    cap.release()
+
+    if not ret:
+        return None
+
+    State.first_frame = frame
+    _, buffer = cv2.imencode('.jpg', frame)
+    jpg_as_text = base64.b64encode(buffer).decode('utf-8')
+    return f"data:image/jpeg;base64,{jpg_as_text}"
 
 # Initialize Models
 unified_model = None
@@ -47,15 +109,15 @@ if args.fuel_model and args.robot_model:
         fuel_model = YOLO(args.fuel_model)
         robot_model = YOLO(args.robot_model)
     except Exception as e:
-        print(f"ERROR: Could not load individual fuel and robot models, defaulting to YOLOv11n: {e}")
-        unified_model = YOLO('yolov11n.pt')
+        print(f"ERROR: Could not load individual fuel and robot models, defaulting to YOLO11n: {e}")
+        unified_model = YOLO('yolo11n.pt')
 else:
     model_path = args.model if args.model else "unified.pt"
     try:
         unified_model = YOLO(model_path) 
     except Exception:
-        print(f"ERROR: Could not load unified model. Defaulting to YOLOv11n.")
-        unified_model = YOLO('yolov11n.pt')
+        print(f"ERROR: Could not load unified model. Defaulting to YOLO11n.")
+        unified_model = YOLO('yolo11n.pt')
 
 # --- KINEMATIC HELPERS ---
 def is_airborne(history, min_frames=3, velocity_threshold=2.0):
@@ -106,17 +168,79 @@ def index():
 
 @app.route('/api/first_frame')
 def api_first_frame():
-    cap = cv2.VideoCapture(State.video_path if os.path.exists(State.video_path) else 0)
-    ret, frame = cap.read()
-    cap.release()
-    
-    if not ret:
+    image = encode_frame_at(State.video_path, State.roi_frame_seconds)
+    if not image:
         return jsonify({"error": "Could not read video"}), 500
-        
-    State.first_frame = frame
-    _, buffer = cv2.imencode('.jpg', frame)
-    jpg_as_text = base64.b64encode(buffer).decode('utf-8')
-    return jsonify({"image": f"data:image/jpeg;base64,{jpg_as_text}"})
+    return jsonify({
+        "image": image,
+        "video_path": State.video_path,
+        "seconds": State.roi_frame_seconds,
+        "video": get_video_info(State.video_path),
+    })
+
+@app.route('/api/frame_at', methods=['POST'])
+def api_frame_at():
+    if State.is_processing:
+        return jsonify({"error": "Cannot change ROI frame while processing"}), 409
+
+    data = request.json or {}
+    try:
+        seconds = max(0.0, float(data.get('seconds', 0)))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Frame time must be a number of seconds"}), 400
+
+    image = encode_frame_at(State.video_path, seconds)
+    if not image:
+        return jsonify({"error": "Could not read frame at that time"}), 500
+
+    State.roi_frame_seconds = seconds
+    State.roi_poly = None
+    return jsonify({
+        "success": True,
+        "image": image,
+        "seconds": State.roi_frame_seconds,
+        "video": get_video_info(State.video_path),
+    })
+
+@app.route('/api/set_video_source', methods=['POST'])
+def api_set_video_source():
+    if State.is_processing:
+        return jsonify({"error": "Cannot change video while processing"}), 409
+
+    data = request.json or {}
+    url = data.get('youtube_url', '').strip()
+    if not url:
+        return jsonify({"error": "YouTube URL is required"}), 400
+    if not is_youtube_url(url):
+        return jsonify({"error": "Please enter a valid YouTube URL"}), 400
+
+    try:
+        video_path = download_youtube_video(url)
+        image = encode_frame_at(video_path, 0)
+    except Exception as e:
+        return jsonify({"error": f"Could not download video: {e}"}), 500
+
+    if not image:
+        return jsonify({"error": "Downloaded video could not be read"}), 500
+
+    State.video_path = video_path
+    State.roi_frame_seconds = 0.0
+    State.roi_poly = None
+    State.is_finished = False
+    State.progress = 0
+    State.current_fuel_count = 0
+    State.robot_crops = {}
+    State.robot_scores = defaultdict(int)
+    State.total_scored_fuel = 0
+    State.final_team_scores = defaultdict(int)
+
+    return jsonify({
+        "success": True,
+        "image": image,
+        "video_path": State.video_path,
+        "seconds": State.roi_frame_seconds,
+        "video": get_video_info(State.video_path),
+    })
 
 @app.route('/api/set_roi', methods=['POST'])
 def api_set_roi():
@@ -177,8 +301,8 @@ def process_video_task():
                 frame, persist=True, verbose=False, imgsz=320
             )
             
-            robot_cls = 0 if unified_model.model_name in ['yolov11n.yaml', 'yolov8n.yaml'] else next((k for k, v in unified_model.names.items() if v == 'robot'), 1)
-            fuel_cls = 32 if unified_model.model_name in ['yolov11n.yaml', 'yolov8n.yaml'] else next((k for k, v in unified_model.names.items() if v == 'fuel'), 0)
+            robot_cls = 0 if unified_model.model_name in ['yolo11n.yaml', 'yolov8n.yaml'] else next((k for k, v in unified_model.names.items() if v == 'robot'), 1)
+            fuel_cls = 32 if unified_model.model_name in ['yolo11n.yaml', 'yolov8n.yaml'] else next((k for k, v in unified_model.names.items() if v == 'fuel'), 0)
 
             if results[0].boxes.id is not None:
                 boxes = results[0].boxes.xyxy.cpu().numpy()
@@ -194,10 +318,10 @@ def process_video_task():
                         fuel_ids_list.append(t_id)
         else:
             fuel_results = fuel_model.track(
-                frame, persist=True, verbose=False, imgsz=320, classes=[32] if fuel_model.model_name in ['yolov11n.yaml', 'yolov8n.yaml'] else None
+                frame, persist=True, verbose=False, imgsz=320, classes=[32] if fuel_model.model_name in ['yolo11n.yaml', 'yolov8n.yaml'] else None
             )
             robot_results = robot_model.track(
-                frame, persist=True, verbose=False, imgsz=320, classes=[0] if robot_model.model_name in ['yolov11n.yaml', 'yolov8n.yaml'] else None
+                frame, persist=True, verbose=False, imgsz=320, classes=[0] if robot_model.model_name in ['yolo11n.yaml', 'yolov8n.yaml'] else None
             )
             
             if robot_results[0].boxes.id is not None:
@@ -324,4 +448,4 @@ def api_submit_attribution():
     })
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8000, debug=True)
+    app.run(host='0.0.0.0', port=8000, debug=True, use_reloader=False)

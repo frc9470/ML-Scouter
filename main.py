@@ -165,7 +165,7 @@ def main():
     except Exception:
         print("\n[WARNING] Custom robot model not found.")
         print("Falling back to standard YOLOv8n for prototype demonstration.")
-        fuel_model = YOLO('yolov8n.pt')
+        robot_model = YOLO('yolov8n.pt')
 
     # Data structures for tracking and scoring
     fuel_history = defaultdict(list)
