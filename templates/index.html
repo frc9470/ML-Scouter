@@ -26,6 +26,39 @@
             </div>
             <p id="source-status" class="source-status"></p>
 
+            <div class="picker-panel">
+                <div class="picker-row">
+                    <input id="tba-auth-key" class="source-input" type="password" placeholder="TBA API key" autocomplete="off" />
+                    <button id="btn-save-tba-key" class="btn secondary" type="button">Save TBA Key</button>
+                </div>
+
+                <!-- Event search dropdown -->
+                <div class="picker-row">
+                    <input id="tba-year" class="frame-input" type="number" min="1992" step="1" value="2026" aria-label="TBA event year" />
+                    <div class="combobox" id="event-combobox">
+                        <div class="combobox-input-wrap">
+                            <svg class="combobox-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.45 4.39l4.26 4.26a.75.75 0 11-1.06 1.06l-4.26-4.26A7 7 0 012 9z" clip-rule="evenodd"/></svg>
+                            <input id="tba-event-query" class="combobox-input" type="search" placeholder="Search TBA events…" autocomplete="off" />
+                            <div class="combobox-spinner" id="event-spinner"></div>
+                        </div>
+                        <ul class="combobox-listbox" id="event-listbox" role="listbox"></ul>
+                    </div>
+                </div>
+
+                <!-- Match search dropdown -->
+                <div class="picker-row">
+                    <div class="combobox combobox-full" id="match-combobox">
+                        <div class="combobox-input-wrap">
+                            <svg class="combobox-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M2.5 7.5a5 5 0 0110 0 5 5 0 01-10 0zm5-6.5a6.5 6.5 0 105.25 10.37l3.94 3.94a.75.75 0 001.06-1.06l-3.94-3.94A6.5 6.5 0 007.5 1z"/></svg>
+                            <input id="tba-match-query" class="combobox-input" type="search" placeholder="Select an event first…" autocomplete="off" disabled />
+                            <div class="combobox-spinner" id="match-spinner"></div>
+                        </div>
+                        <ul class="combobox-listbox" id="match-listbox" role="listbox"></ul>
+                    </div>
+                </div>
+            </div>
+            <p id="tba-status" class="source-status"></p>
+
             <div class="frame-panel">
                 <button id="btn-frame-back" class="btn secondary" type="button">-5s</button>
                 <input id="roi-frame-seconds" class="frame-input" type="number" min="0" step="0.5" value="0" aria-label="ROI frame time in seconds" />
@@ -33,6 +66,12 @@
                 <button id="btn-frame-forward" class="btn secondary" type="button">+5s</button>
             </div>
             <p id="frame-status" class="source-status"></p>
+
+            <div class="frame-panel">
+                <label class="field-label" for="process-seconds">Analyze seconds</label>
+                <input id="process-seconds" class="frame-input" type="number" min="0" step="1" value="20" />
+                <span class="field-hint">Use 0 for full video.</span>
+            </div>
             
             <div class="canvas-container">
                 <img id="first-frame" src="" alt="First Frame" />
@@ -54,6 +93,11 @@
                 <div id="progress-bar" style="width:0%; height:100%; background:var(--primary); transition: width 0.5s;"></div>
             </div>
             <p id="progress-text" style="text-align:center; font-weight:bold; font-size:1.5rem; color:var(--accent);">0%</p>
+
+            <div class="live-preview-container">
+                <img id="live-preview" alt="Live annotated analysis preview" />
+                <div id="live-preview-placeholder">Live annotated preview will appear after processing starts.</div>
+            </div>
             
             <div class="stats-bar" style="margin-top: 1.5rem;">
                 <div class="stat-box" style="text-align: center;">

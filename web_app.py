@@ -1,17 +1,56 @@
 import os
 import cv2
 import base64
+import json
 import threading
 import numpy as np
 import yt_dlp
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
 from collections import defaultdict
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from urllib.parse import urlparse
 from ultralytics import YOLO
 
 app = Flask(__name__)
 os.makedirs('static/crops', exist_ok=True)
 os.makedirs('static/downloads', exist_ok=True)
+
+TBA_BASE_URL = "https://www.thebluealliance.com/api/v3"
+
+def write_local_env_value(key, value, path=".env.local"):
+    lines = []
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as env_file:
+            lines = env_file.readlines()
+
+    key_prefix = f"{key}="
+    replacement = f"{key}={value}\n"
+    for index, line in enumerate(lines):
+        if line.strip().startswith(key_prefix):
+            lines[index] = replacement
+            break
+    else:
+        lines.append(replacement)
+
+    with open(path, "w", encoding="utf-8") as env_file:
+        env_file.writelines(lines)
+
+def load_local_env(path=".env.local"):
+    if not os.path.exists(path):
+        return
+
+    with open(path, "r", encoding="utf-8") as env_file:
+        for raw_line in env_file:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            os.environ.setdefault(key, value)
+
+load_local_env()
 
 # --- GLOBAL STATE ---
 class State:
@@ -28,6 +67,9 @@ class State:
     final_team_scores = defaultdict(int)
     video_path = "match_video.mp4"
     roi_frame_seconds = 0.0
+    process_seconds = 20.0
+    preview_frame_jpeg = None
+    preview_lock = threading.Lock()
 
 import argparse
 
@@ -70,6 +112,49 @@ def download_youtube_video(url):
 
     return downloaded_path
 
+def tba_get(path):
+    auth_key = os.environ.get("TBA_AUTH_KEY") or os.environ.get("TBA_API_KEY")
+    if not auth_key:
+        raise RuntimeError("Set TBA_AUTH_KEY or TBA_API_KEY before using the TBA picker")
+
+    request = Request(
+        f"{TBA_BASE_URL}{path}",
+        headers={
+            "X-TBA-Auth-Key": auth_key,
+            "User-Agent": "ML-Scouter/1.0",
+        },
+    )
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+def tba_is_configured():
+    return bool(os.environ.get("TBA_AUTH_KEY") or os.environ.get("TBA_API_KEY"))
+
+def tba_error_response(error):
+    if isinstance(error, RuntimeError):
+        return jsonify({"error": str(error)}), 503
+    if isinstance(error, HTTPError):
+        return jsonify({"error": f"TBA API returned HTTP {error.code}"}), error.code
+    if isinstance(error, URLError):
+        return jsonify({"error": f"Could not reach TBA API: {error.reason}"}), 502
+    return jsonify({"error": f"Could not query TBA API: {error}"}), 500
+
+def match_sort_key(match):
+    comp_order = {"qm": 0, "ef": 1, "qf": 2, "sf": 3, "f": 4}
+    return (
+        comp_order.get(match.get("comp_level"), 99),
+        match.get("set_number") or 0,
+        match.get("match_number") or 0,
+    )
+
+def format_match_label(match):
+    comp_level = match.get("comp_level", "").upper()
+    set_number = match.get("set_number") or 1
+    match_number = match.get("match_number") or 0
+    if comp_level == "QM":
+        return f"Qual {match_number}"
+    return f"{comp_level} {set_number}-{match_number}"
+
 def get_video_info(video_path):
     cap = cv2.VideoCapture(video_path if os.path.exists(video_path) else 0)
     fps = cap.get(cv2.CAP_PROP_FPS) or 0
@@ -98,6 +183,27 @@ def encode_frame_at(video_path, seconds=0):
     _, buffer = cv2.imencode('.jpg', frame)
     jpg_as_text = base64.b64encode(buffer).decode('utf-8')
     return f"data:image/jpeg;base64,{jpg_as_text}"
+
+def update_live_preview(frame, frame_count, stride=5, max_width=960):
+    if frame_count % stride != 0:
+        return
+
+    preview_frame = frame
+    height, width = preview_frame.shape[:2]
+    if width > max_width:
+        scale = max_width / width
+        preview_frame = cv2.resize(
+            preview_frame,
+            (max_width, int(height * scale)),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    ok, buffer = cv2.imencode('.jpg', preview_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
+    if not ok:
+        return
+
+    with State.preview_lock:
+        State.preview_frame_jpeg = buffer.tobytes()
 
 # Initialize Models
 unified_model = None
@@ -233,6 +339,8 @@ def api_set_video_source():
     State.robot_scores = defaultdict(int)
     State.total_scored_fuel = 0
     State.final_team_scores = defaultdict(int)
+    with State.preview_lock:
+        State.preview_frame_jpeg = None
 
     return jsonify({
         "success": True,
@@ -242,14 +350,110 @@ def api_set_video_source():
         "video": get_video_info(State.video_path),
     })
 
+@app.route('/api/tba/config', methods=['GET', 'POST'])
+def api_tba_config():
+    if request.method == 'GET':
+        return jsonify({"configured": tba_is_configured()})
+
+    data = request.json or {}
+    key = data.get("auth_key", "").strip()
+    if not key:
+        return jsonify({"error": "TBA API key is required"}), 400
+
+    try:
+        write_local_env_value("TBA_AUTH_KEY", key)
+        os.environ["TBA_AUTH_KEY"] = key
+    except Exception as e:
+        return jsonify({"error": f"Could not save TBA API key: {e}"}), 500
+
+    return jsonify({"success": True, "configured": True})
+
+@app.route('/api/tba/events')
+def api_tba_events():
+    try:
+        year = int(request.args.get('year', ''))
+    except ValueError:
+        return jsonify({"error": "Year must be a number"}), 400
+
+    query = request.args.get('q', '').strip().lower()
+    try:
+        events = tba_get(f"/events/{year}/simple")
+    except Exception as e:
+        return tba_error_response(e)
+
+    if query:
+        events = [
+            event for event in events
+            if query in event.get("name", "").lower()
+            or query in event.get("key", "").lower()
+            or query in event.get("city", "").lower()
+            or query in event.get("state_prov", "").lower()
+            or query in event.get("country", "").lower()
+        ]
+
+    events = sorted(events, key=lambda event: (event.get("start_date") or "", event.get("name") or ""))
+    return jsonify({
+        "events": [
+            {
+                "key": event.get("key"),
+                "name": event.get("name"),
+                "city": event.get("city"),
+                "state_prov": event.get("state_prov"),
+                "country": event.get("country"),
+                "start_date": event.get("start_date"),
+                "end_date": event.get("end_date"),
+            }
+            for event in events[:75]
+        ]
+    })
+
+@app.route('/api/tba/event/<event_key>/matches')
+def api_tba_event_matches(event_key):
+    try:
+        matches = tba_get(f"/event/{event_key}/matches")
+    except Exception as e:
+        return tba_error_response(e)
+
+    match_options = []
+    for match in sorted(matches, key=match_sort_key):
+        youtube_videos = [
+            video for video in match.get("videos", [])
+            if video.get("type") == "youtube" and video.get("key")
+        ]
+        if not youtube_videos:
+            continue
+
+        youtube_key = youtube_videos[0]["key"]
+        red = [team.replace("frc", "") for team in match.get("alliances", {}).get("red", {}).get("team_keys", [])]
+        blue = [team.replace("frc", "") for team in match.get("alliances", {}).get("blue", {}).get("team_keys", [])]
+        match_options.append({
+            "key": match.get("key"),
+            "label": format_match_label(match),
+            "youtube_key": youtube_key,
+            "youtube_url": f"https://www.youtube.com/watch?v={youtube_key}",
+            "red": red,
+            "blue": blue,
+            "time": match.get("time") or match.get("actual_time"),
+        })
+
+    return jsonify({"matches": match_options})
+
 @app.route('/api/set_roi', methods=['POST'])
 def api_set_roi():
-    data = request.json
+    data = request.json or {}
     points = data.get('points', [])
     if len(points) < 3:
         return jsonify({"error": "Need at least 3 points"}), 400
+
+    try:
+        process_seconds = float(data.get('process_seconds', State.process_seconds))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Analyze duration must be a number of seconds"}), 400
+    if process_seconds < 0:
+        return jsonify({"error": "Analyze duration cannot be negative"}), 400
     
     State.roi_poly = np.array(points, np.int32).reshape((-1, 1, 2))
+    State.process_seconds = process_seconds
     State.is_processing = True
     State.is_finished = False
     State.progress = 0
@@ -257,6 +461,8 @@ def api_set_roi():
     State.robot_crops = {}
     State.robot_scores = defaultdict(int)
     State.total_scored_fuel = 0
+    with State.preview_lock:
+        State.preview_frame_jpeg = None
     
     # Start background processing thread
     threading.Thread(target=process_video_task).start()
@@ -267,8 +473,16 @@ def process_video_task():
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    State.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if State.total_frames <= 0: State.total_frames = 1
+    source_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    max_frames = int(State.process_seconds * fps) if State.process_seconds > 0 else source_total_frames
+    if source_total_frames > 0 and max_frames > 0:
+        State.total_frames = min(source_total_frames, max_frames)
+    elif max_frames > 0:
+        State.total_frames = max_frames
+    elif source_total_frames > 0:
+        State.total_frames = source_total_frames
+    else:
+        State.total_frames = 1
     
     # Write directly to mp4 using avc1 codec (H264)
     out_path = 'static/output.mp4'
@@ -391,7 +605,11 @@ def process_video_task():
 
         cv2.putText(display_frame, f"Scored FUEL: {State.total_scored_fuel}", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
 
+        update_live_preview(display_frame, frame_count)
         out.write(display_frame)
+
+        if max_frames > 0 and frame_count >= max_frames:
+            break
 
     cap.release()
     out.release()
@@ -407,8 +625,20 @@ def api_status():
         "progress": State.progress,
         "total_frames": State.total_frames,
         "total_scored": State.total_scored_fuel,
-        "current_fuel_count": State.current_fuel_count
+        "current_fuel_count": State.current_fuel_count,
+        "process_seconds": State.process_seconds,
+        "preview_available": State.preview_frame_jpeg is not None
     })
+
+@app.route('/api/live_frame')
+def api_live_frame():
+    with State.preview_lock:
+        frame = State.preview_frame_jpeg
+
+    if frame is None:
+        return Response(status=204)
+
+    return Response(frame, mimetype='image/jpeg')
 
 @app.route('/api/results')
 def api_results():

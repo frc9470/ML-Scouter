@@ -7,3 +7,7 @@ runs/*
 
 # Dev environment related
 .vscode/
+.env
+.env.*
+!.env.example
+.DS_Store
