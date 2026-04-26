@@ -39,6 +39,11 @@ PERSPECTIVE_CONFIG_PATH = project_path("data", "perspective_config.json")
 FUEL_INFERENCE_SIZE = 640
 ROBOT_INFERENCE_SIZE = 640
 YOLO_DEBUG_SIZE = 640
+TRACKER_CONFIGS = {
+    "botsort": {"label": "BoT-SORT", "config": "botsort.yaml"},
+    "bytetrack": {"label": "ByteTrack", "config": "bytetrack.yaml"},
+}
+COMPARE_TRACKER_MODE = "compare"
 
 def write_local_env_value(key, value, path=None):
     path = path or project_path(".env.local")
@@ -102,6 +107,13 @@ class State:
     robot_alliances = {}
     ocr_assignments = {}
     ocr_status = {"enabled": False, "message": "OCR has not run yet."}
+    tracker_mode = "botsort"
+    analysis_runs = {}
+    active_analysis_run = None
+    processing_tracker = None
+    processing_pass_index = 0
+    processing_pass_total = 1
+    processing_status = ""
 
 import argparse
 
@@ -491,6 +503,7 @@ def run_robot_ocr_assignment(robot_crops, robot_alliances, match_alliances):
 unified_model = None
 fuel_model = None
 robot_model = None
+MODEL_RUNTIME = {}
 
 FUEL_CLASS_ALIASES = {"fuel", "ball", "flying_fuel", "flying fuel", "gamepiece", "game piece"}
 ROBOT_CLASS_ALIASES = {"robot", "robots", "bot"}
@@ -555,6 +568,98 @@ def load_yolo(path, label):
     print(f"Loaded {label} model: {path} [{names}]")
     return model
 
+def valid_tracker_keys():
+    return tuple(TRACKER_CONFIGS.keys())
+
+def normalize_tracker_mode(value):
+    value = str(value or "").strip().lower()
+    if value == COMPARE_TRACKER_MODE:
+        return COMPARE_TRACKER_MODE
+    if value in TRACKER_CONFIGS:
+        return value
+    return "botsort"
+
+def tracker_runs_for_mode(mode):
+    mode = normalize_tracker_mode(mode)
+    if mode == COMPARE_TRACKER_MODE:
+        return ["botsort", "bytetrack"]
+    return [mode]
+
+def tracker_meta(key):
+    return TRACKER_CONFIGS[key]
+
+def tracker_label(key):
+    return tracker_meta(key)["label"]
+
+def tracker_config_name(key):
+    return tracker_meta(key)["config"]
+
+def tracker_output_paths(key):
+    return {
+        "annotated": project_path("static", f"output_{key}.mp4"),
+        "yolo_debug": project_path("static", f"yolo_debug_{key}.mp4"),
+        "projection": project_path("static", f"robot_projection_{key}.mp4"),
+    }
+
+def tracker_video_urls(key):
+    return {
+        "annotated": f"/static/output_{key}.mp4",
+        "yolo_debug": f"/static/yolo_debug_{key}.mp4",
+        "projection": f"/static/robot_projection_{key}.mp4",
+    }
+
+def clear_preview_frame():
+    with State.preview_lock:
+        State.preview_frame_jpeg = None
+
+def reset_analysis_state():
+    State.is_finished = False
+    State.progress = 0
+    State.current_fuel_count = 0
+    State.robot_crops = {}
+    State.robot_scores = defaultdict(int)
+    State.total_scored_fuel = 0
+    State.final_team_scores = defaultdict(int)
+    State.robot_paths = []
+    State.robot_path_count = 0
+    State.robot_alliances = {}
+    State.ocr_assignments = {}
+    State.ocr_status = {"enabled": False, "message": "OCR has not run yet."}
+    State.analysis_runs = {}
+    State.active_analysis_run = None
+    State.processing_tracker = None
+    State.processing_pass_index = 0
+    State.processing_pass_total = 1
+    State.processing_status = ""
+    clear_preview_frame()
+
+def activate_analysis_run(key):
+    snapshot = State.analysis_runs.get(key)
+    if not snapshot:
+        return False
+    State.active_analysis_run = key
+    State.robot_crops = snapshot["robot_crops"]
+    State.robot_scores = defaultdict(int, snapshot["robot_scores"])
+    State.total_scored_fuel = snapshot["total_scored_fuel"]
+    State.robot_paths = snapshot["robot_paths"]
+    State.robot_path_count = snapshot["robot_path_count"]
+    State.robot_alliances = snapshot["robot_alliances"]
+    State.ocr_assignments = snapshot["ocr_assignments"]
+    State.ocr_status = snapshot["ocr_status"]
+    return True
+
+def analysis_run_summaries():
+    runs = []
+    for key in tracker_runs_for_mode(State.tracker_mode):
+        snapshot = State.analysis_runs.get(key)
+        if not snapshot:
+            continue
+        summary = dict(snapshot["summary"])
+        summary["active"] = key == State.active_analysis_run
+        summary["video_urls"] = snapshot["video_urls"]
+        runs.append(summary)
+    return runs
+
 # Resolve model paths: explicit flags > bundled AutoScouter robot model > uploaded models/ dir > unified > YOLO11n.
 _fuel_path = resolve_existing_path(args.fuel_model) or resolve_existing_path(
     project_path("models", "flying_fuel_best.pt")
@@ -569,6 +674,11 @@ if _fuel_path and _robot_path:
     try:
         fuel_model = load_yolo(_fuel_path, "fuel")
         robot_model = load_yolo(_robot_path, "robot")
+        MODEL_RUNTIME = {
+            "mode": "separate",
+            "fuel_path": _fuel_path,
+            "robot_path": _robot_path,
+        }
         State.model_status = {
             "mode": "separate",
             "fuel_model": _fuel_path,
@@ -578,14 +688,23 @@ if _fuel_path and _robot_path:
         }
     except Exception as e:
         print(f"ERROR: Could not load uploaded fuel/robot models: {e}")
-        unified_model = load_yolo(resolve_existing_path("yolo11n.pt") or "yolo11n.pt", "COCO fallback")
-        State.model_status = {"mode": "coco_fallback", "error": str(e), "model": "yolo11n.pt"}
+        fallback_path = resolve_existing_path("yolo11n.pt") or "yolo11n.pt"
+        unified_model = load_yolo(fallback_path, "COCO fallback")
+        MODEL_RUNTIME = {
+            "mode": "unified",
+            "model_path": fallback_path,
+        }
+        State.model_status = {"mode": "coco_fallback", "error": str(e), "model": fallback_path}
 else:
     model_path = resolve_existing_path(args.model) or resolve_existing_path("unified.pt")
     try:
         if not model_path:
             raise FileNotFoundError("No uploaded separate models or unified.pt found")
         unified_model = load_yolo(model_path, "unified")
+        MODEL_RUNTIME = {
+            "mode": "unified",
+            "model_path": model_path,
+        }
         State.model_status = {
             "mode": "unified",
             "model": model_path,
@@ -595,7 +714,30 @@ else:
         print(f"ERROR: Could not load custom model. Defaulting to YOLO11n: {e}")
         fallback_path = resolve_existing_path("yolo11n.pt") or "yolo11n.pt"
         unified_model = load_yolo(fallback_path, "COCO fallback")
+        MODEL_RUNTIME = {
+            "mode": "unified",
+            "model_path": fallback_path,
+        }
         State.model_status = {"mode": "coco_fallback", "error": str(e), "model": fallback_path}
+
+def load_models_for_analysis():
+    if MODEL_RUNTIME.get("mode") == "separate":
+        fresh_fuel_model = load_yolo(MODEL_RUNTIME["fuel_path"], "fuel")
+        fresh_robot_model = load_yolo(MODEL_RUNTIME["robot_path"], "robot")
+        return {
+            "unified_model": None,
+            "fuel_model": fresh_fuel_model,
+            "robot_model": fresh_robot_model,
+            "robot_class_names": model_names(fresh_robot_model),
+        }
+
+    fresh_unified_model = load_yolo(MODEL_RUNTIME["model_path"], "unified")
+    return {
+        "unified_model": fresh_unified_model,
+        "fuel_model": None,
+        "robot_model": None,
+        "robot_class_names": model_names(fresh_unified_model),
+    }
 
 # --- KINEMATIC HELPERS ---
 def is_airborne(history, min_frames=3, velocity_threshold=2.0):
@@ -704,24 +846,11 @@ def api_set_video_source():
     State.video_path = video_path
     State.roi_frame_seconds = 0.0
     State.roi_poly = None
-    State.is_finished = False
-    State.progress = 0
-    State.current_fuel_count = 0
-    State.robot_crops = {}
-    State.robot_scores = defaultdict(int)
-    State.total_scored_fuel = 0
-    State.final_team_scores = defaultdict(int)
-    State.robot_paths = []
-    State.robot_path_count = 0
-    State.robot_alliances = {}
-    State.ocr_assignments = {}
-    State.ocr_status = {"enabled": False, "message": "OCR has not run yet."}
+    reset_analysis_state()
     State.match_alliances = {
         "red": normalize_team_list(data.get("red", [])),
         "blue": normalize_team_list(data.get("blue", [])),
     }
-    with State.preview_lock:
-        State.preview_frame_jpeg = None
 
     return jsonify({
         "success": True,
@@ -832,23 +961,15 @@ def api_set_roi():
         return jsonify({"error": "Analyze duration must be a number of seconds"}), 400
     if process_seconds < 0:
         return jsonify({"error": "Analyze duration cannot be negative"}), 400
+    tracker_mode = normalize_tracker_mode(data.get("tracker_mode"))
     
     State.roi_poly = np.array(points, np.int32).reshape((-1, 1, 2))
     State.process_seconds = process_seconds
+    State.tracker_mode = tracker_mode
     State.is_processing = True
-    State.is_finished = False
-    State.progress = 0
-    State.current_fuel_count = 0
-    State.robot_crops = {}
-    State.robot_scores = defaultdict(int)
-    State.total_scored_fuel = 0
-    State.robot_paths = []
-    State.robot_path_count = 0
-    State.robot_alliances = {}
-    State.ocr_assignments = {}
-    State.ocr_status = {"enabled": False, "message": "OCR has not run yet."}
-    with State.preview_lock:
-        State.preview_frame_jpeg = None
+    reset_analysis_state()
+    State.is_processing = True
+    State.processing_pass_total = len(tracker_runs_for_mode(tracker_mode))
     
     # Start background processing thread
     threading.Thread(target=process_video_task).start()
@@ -873,39 +994,50 @@ def api_set_perspective_config():
 
     return jsonify({"success": True, "config": State.perspective_config})
 
-def process_video_task():
+@app.route('/api/select_analysis_run', methods=['POST'])
+def api_select_analysis_run():
+    if State.is_processing:
+        return jsonify({"error": "Cannot change analysis run while processing"}), 409
+
+    run_key = normalize_tracker_mode((request.json or {}).get("run_key"))
+    if run_key == COMPARE_TRACKER_MODE:
+        return jsonify({"error": "Select a concrete tracker run"}), 400
+    if not activate_analysis_run(run_key):
+        return jsonify({"error": f"Analysis run '{run_key}' is not available"}), 404
+
+    return jsonify({
+        "success": True,
+        "active_analysis_run": State.active_analysis_run,
+        "analysis_runs": analysis_run_summaries(),
+    })
+
+def run_analysis_pass(tracker_key, progress_offset, per_pass_frame_limit):
+    model_bundle = load_models_for_analysis()
+    active_unified_model = model_bundle["unified_model"]
+    active_fuel_model = model_bundle["fuel_model"]
+    active_robot_model = model_bundle["robot_model"]
+    robot_class_names = model_bundle["robot_class_names"]
+
     cap = cv2.VideoCapture(State.video_path if os.path.exists(State.video_path) else 0)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    source_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    max_frames = int(State.process_seconds * fps) if State.process_seconds > 0 else source_total_frames
-    if source_total_frames > 0 and max_frames > 0:
-        State.total_frames = min(source_total_frames, max_frames)
-    elif max_frames > 0:
-        State.total_frames = max_frames
-    elif source_total_frames > 0:
-        State.total_frames = source_total_frames
-    else:
-        State.total_frames = 1
-    
-    # Write directly to mp4 using avc1 codec (H264)
-    out_path = project_path('static', 'output.mp4')
-    yolo_out_path = project_path('static', 'yolo_debug.mp4')
-    projection_out_path = project_path('static', 'robot_projection.mp4')
+    output_paths = tracker_output_paths(tracker_key)
     projection_size = projection_video_size(State.perspective_config)
     fourcc = cv2.VideoWriter_fourcc(*'avc1')
-    out = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
-    yolo_out = cv2.VideoWriter(yolo_out_path, fourcc, fps, (YOLO_DEBUG_SIZE, YOLO_DEBUG_SIZE))
-    projection_out = cv2.VideoWriter(projection_out_path, fourcc, fps, projection_size)
+    out = cv2.VideoWriter(output_paths["annotated"], fourcc, fps, (width, height))
+    yolo_out = cv2.VideoWriter(output_paths["yolo_debug"], fourcc, fps, (YOLO_DEBUG_SIZE, YOLO_DEBUG_SIZE))
+    projection_out = cv2.VideoWriter(output_paths["projection"], fourcc, fps, projection_size)
     
     fuel_history = defaultdict(list)
     robot_history = defaultdict(list)
     scored_fuel_ids = set()
     frame_count = 0
+    total_fuel_detections = 0
+    frames_with_fuel = 0
+    max_live_fuel_count = 0
     camera_views = build_camera_views(State.perspective_config)
     field_tracker = FieldPathTracker()
-    robot_class_names = model_names(unified_model if unified_model else robot_model)
     
     while True:
         ret, frame = cap.read()
@@ -913,7 +1045,7 @@ def process_video_task():
             break
             
         frame_count += 1
-        State.progress = frame_count
+        State.progress = progress_offset + frame_count
         display_frame = frame.copy()
 
         if State.roi_poly is not None:
@@ -922,13 +1054,17 @@ def process_video_task():
         robot_boxes_list, robot_ids_list, robot_conf_list, robot_class_list = [], [], [], []
         fuel_boxes_list, fuel_ids_list, fuel_conf_list = [], [], []
 
-        if unified_model:
-            results = unified_model.track(
-                frame, persist=True, verbose=False, imgsz=ROBOT_INFERENCE_SIZE
+        if active_unified_model:
+            results = active_unified_model.track(
+                frame,
+                persist=True,
+                verbose=False,
+                imgsz=ROBOT_INFERENCE_SIZE,
+                tracker=tracker_config_name(tracker_key),
             )
             
-            robot_cls = class_id_for(unified_model, "robot")
-            fuel_cls = class_id_for(unified_model, "fuel")
+            robot_cls = class_id_for(active_unified_model, "robot")
+            fuel_cls = class_id_for(active_unified_model, "fuel")
 
             if results[0].boxes.id is not None:
                 boxes = results[0].boxes.xyxy.cpu().numpy()
@@ -937,29 +1073,31 @@ def process_video_task():
                 classes = results[0].boxes.cls.cpu().numpy().astype(int)
                 
                 for b, t_id, conf, c in zip(boxes, ids, confidences, classes):
-                    if (robot_cls is not None and c == robot_cls) or class_matches_target(unified_model, "robot", c):
+                    if (robot_cls is not None and c == robot_cls) or class_matches_target(active_unified_model, "robot", c):
                         robot_boxes_list.append(b)
                         robot_ids_list.append(t_id)
                         robot_conf_list.append(conf)
                         robot_class_list.append(c)
-                    elif (fuel_cls is not None and c == fuel_cls) or class_matches_target(unified_model, "fuel", c):
+                    elif (fuel_cls is not None and c == fuel_cls) or class_matches_target(active_unified_model, "fuel", c):
                         fuel_boxes_list.append(b)
                         fuel_ids_list.append(t_id)
                         fuel_conf_list.append(conf)
         else:
-            fuel_results = fuel_model.track(
+            fuel_results = active_fuel_model.track(
                 frame,
                 persist=True,
                 verbose=False,
                 imgsz=FUEL_INFERENCE_SIZE,
-                classes=class_filter_for(fuel_model, "fuel"),
+                classes=class_filter_for(active_fuel_model, "fuel"),
+                tracker=tracker_config_name(tracker_key),
             )
-            robot_results = robot_model.track(
+            robot_results = active_robot_model.track(
                 frame,
                 persist=True,
                 verbose=False,
                 imgsz=ROBOT_INFERENCE_SIZE,
-                classes=class_filter_for(robot_model, "robot"),
+                classes=class_filter_for(active_robot_model, "robot"),
+                tracker=tracker_config_name(tracker_key),
             )
             
             if robot_results[0].boxes.id is not None:
@@ -983,6 +1121,10 @@ def process_video_task():
                     fuel_conf_list.append(conf)
 
         State.current_fuel_count = len(fuel_boxes_list)
+        total_fuel_detections += len(fuel_boxes_list)
+        if fuel_boxes_list:
+            frames_with_fuel += 1
+        max_live_fuel_count = max(max_live_fuel_count, len(fuel_boxes_list))
         yolo_debug_frame = draw_yolo_debug_frame(
             frame,
             fuel_boxes_list,
@@ -1083,9 +1225,9 @@ def process_video_task():
                         State.robot_scores[source_robot_id] += 1
 
             color = (0, 255, 0) if f_id in scored_fuel_ids else (0, 0, 255)
-            status_text = "SCORED" if f_id in scored_fuel_ids else f"FUEL {f_id}"
             cv2.rectangle(display_frame, (fx1, fy1), (fx2, fy2), color, 2)
-            cv2.putText(display_frame, status_text, (fx1, fy1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            if f_id in scored_fuel_ids:
+                cv2.putText(display_frame, "SCORED", (fx1, fy1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             pts = np.array([[pt['x'], pt['y']] for pt in fuel_history[f_id]], np.int32)
             cv2.polylines(display_frame, [pts], False, color, 1)
 
@@ -1099,23 +1241,107 @@ def process_video_task():
         yolo_out.write(yolo_debug_frame)
         projection_out.write(projection_debug_frame)
 
-        if max_frames > 0 and frame_count >= max_frames:
+        if per_pass_frame_limit > 0 and frame_count >= per_pass_frame_limit:
             break
 
     cap.release()
     out.release()
     yolo_out.release()
     projection_out.release()
-    
-    State.robot_paths = [path.to_dict() for path in field_tracker.all_paths()]
-    State.robot_path_count = len(State.robot_paths)
-    State.ocr_assignments, State.ocr_status = run_robot_ocr_assignment(
-        State.robot_crops,
-        State.robot_alliances,
+
+    robot_paths = [path.to_dict() for path in field_tracker.all_paths()]
+    robot_path_count = len(robot_paths)
+    ocr_assignments, ocr_status = run_robot_ocr_assignment(
+        State.robot_crops.copy(),
+        State.robot_alliances.copy(),
         State.match_alliances,
     )
-    State.is_processing = False
-    State.is_finished = True
+    runtime_seconds = frame_count / fps if fps and frame_count > 0 else 0.0
+
+    return {
+        "key": tracker_key,
+        "label": tracker_label(tracker_key),
+        "robot_crops": dict(State.robot_crops),
+        "robot_scores": dict(State.robot_scores),
+        "total_scored_fuel": State.total_scored_fuel,
+        "robot_paths": robot_paths,
+        "robot_path_count": robot_path_count,
+        "robot_alliances": dict(State.robot_alliances),
+        "ocr_assignments": ocr_assignments,
+        "ocr_status": ocr_status,
+        "video_urls": tracker_video_urls(tracker_key),
+        "summary": {
+            "key": tracker_key,
+            "label": tracker_label(tracker_key),
+            "tracker_config": tracker_config_name(tracker_key),
+            "frames_processed": frame_count,
+            "runtime_seconds": round(runtime_seconds, 2),
+            "unique_fuel_tracks": len(fuel_history),
+            "fuel_detections": total_fuel_detections,
+            "frames_with_fuel": frames_with_fuel,
+            "avg_fuel_detections_per_frame": round(total_fuel_detections / frame_count, 3) if frame_count else 0,
+            "max_live_fuel_count": max_live_fuel_count,
+            "total_scored": State.total_scored_fuel,
+            "robot_path_count": robot_path_count,
+        },
+    }
+
+def process_video_task():
+    runs = tracker_runs_for_mode(State.tracker_mode)
+    cap = cv2.VideoCapture(State.video_path if os.path.exists(State.video_path) else 0)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    source_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+
+    max_frames = int(State.process_seconds * fps) if State.process_seconds > 0 else source_total_frames
+    if source_total_frames > 0 and max_frames > 0:
+        per_pass_frame_limit = min(source_total_frames, max_frames)
+    elif max_frames > 0:
+        per_pass_frame_limit = max_frames
+    elif source_total_frames > 0:
+        per_pass_frame_limit = source_total_frames
+    else:
+        per_pass_frame_limit = 1
+
+    State.total_frames = max(1, per_pass_frame_limit * len(runs))
+    State.processing_pass_total = len(runs)
+
+    try:
+        for index, tracker_key in enumerate(runs, start=1):
+            State.current_fuel_count = 0
+            State.robot_crops = {}
+            State.robot_scores = defaultdict(int)
+            State.total_scored_fuel = 0
+            State.robot_paths = []
+            State.robot_path_count = 0
+            State.robot_alliances = {}
+            State.ocr_assignments = {}
+            State.ocr_status = {"enabled": False, "message": "OCR has not run yet."}
+            clear_preview_frame()
+            State.is_processing = True
+            State.processing_pass_index = index
+            State.processing_pass_total = len(runs)
+            State.processing_tracker = tracker_key
+            State.processing_status = f"Running {tracker_label(tracker_key)} ({index}/{len(runs)})"
+            snapshot = run_analysis_pass(
+                tracker_key,
+                progress_offset=(index - 1) * per_pass_frame_limit,
+                per_pass_frame_limit=per_pass_frame_limit,
+            )
+            State.analysis_runs[tracker_key] = snapshot
+
+        if runs:
+            activate_analysis_run(runs[0])
+        State.current_fuel_count = 0
+        State.progress = State.total_frames
+        State.processing_status = "Analysis complete."
+        State.is_finished = True
+    except Exception as error:
+        State.processing_status = f"Analysis failed: {error}"
+        State.ocr_status = {"enabled": False, "message": State.processing_status}
+        State.is_finished = False
+    finally:
+        State.is_processing = False
 
 @app.route('/api/status')
 def api_status():
@@ -1131,6 +1357,13 @@ def api_status():
         "model_status": State.model_status,
         "robot_path_count": State.robot_path_count,
         "ocr_status": State.ocr_status,
+        "tracker_mode": State.tracker_mode,
+        "active_analysis_run": State.active_analysis_run,
+        "analysis_runs": analysis_run_summaries(),
+        "processing_tracker": State.processing_tracker,
+        "processing_pass_index": State.processing_pass_index,
+        "processing_pass_total": State.processing_pass_total,
+        "processing_status": State.processing_status,
     })
 
 @app.route('/api/live_frame')
@@ -1158,6 +1391,8 @@ def api_results():
         "ocr_assignments": State.ocr_assignments,
         "ocr_status": State.ocr_status,
         "match_alliances": State.match_alliances,
+        "active_analysis_run": State.active_analysis_run,
+        "analysis_runs": analysis_run_summaries(),
     })
 
 @app.route('/api/submit_attribution', methods=['POST'])

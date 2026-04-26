@@ -21,8 +21,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const processSecondsInput = document.getElementById('process-seconds');
     const frameError = document.getElementById('first-frame-error');
     const calibrationStatus = document.getElementById('calibration-status');
+    const analysisRunPanel = document.getElementById('analysis-run-panel');
+    const analysisRunSelect = document.getElementById('analysis-run-select');
+    const analysisRunSummary = document.getElementById('analysis-run-summary');
+    const analysisRunStatus = document.getElementById('analysis-run-status');
     const currentYear = new Date().getFullYear();
     document.getElementById('tba-year').value = currentYear;
+    let analysisRuns = [];
 
     function cloneJson(value) {
         return JSON.parse(JSON.stringify(value));
@@ -49,6 +54,71 @@ document.addEventListener('DOMContentLoaded', () => {
         document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
         document.getElementById(id).classList.add('active');
         window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function selectedTrackerMode() {
+        const checked = document.querySelector('input[name="tracker-mode"]:checked');
+        return checked ? checked.value : 'botsort';
+    }
+
+    function withCacheBuster(url) {
+        return `${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}`;
+    }
+
+    function loadPlaybackVideos(run) {
+        if (!run || !run.video_urls) return;
+        document.getElementById('video-source').src = withCacheBuster(run.video_urls.annotated);
+        document.getElementById('video-player').load();
+        document.getElementById('yolo-debug-source').src = withCacheBuster(run.video_urls.yolo_debug);
+        document.getElementById('yolo-debug-player').load();
+        document.getElementById('projection-source').src = withCacheBuster(run.video_urls.projection);
+        document.getElementById('projection-player').load();
+    }
+
+    function renderAnalysisRuns(runs, activeKey) {
+        analysisRuns = Array.isArray(runs) ? runs : [];
+        if (!analysisRuns.length) {
+            analysisRunPanel.style.display = 'none';
+            analysisRunSummary.innerHTML = '';
+            analysisRunSelect.innerHTML = '';
+            return;
+        }
+
+        analysisRunPanel.style.display = '';
+        analysisRunSelect.innerHTML = analysisRuns
+            .map(run => `<option value="${run.key}" ${run.key === activeKey ? 'selected' : ''}>${esc(run.label)}</option>`)
+            .join('');
+        analysisRunSummary.innerHTML = analysisRuns.map(run => {
+            const activeClass = run.key === activeKey ? ' active' : '';
+            return `<div class="comparison-card${activeClass}">
+                <h4>${esc(run.label)}</h4>
+                <p>${esc(run.tracker_config || '')}</p>
+                <div class="comparison-metric"><span>Scored Fuel</span><strong>${run.total_scored}</strong></div>
+                <div class="comparison-metric"><span>Unique Fuel IDs</span><strong>${run.unique_fuel_tracks}</strong></div>
+                <div class="comparison-metric"><span>Fuel Detections</span><strong>${run.fuel_detections}</strong></div>
+                <div class="comparison-metric"><span>Robot Paths</span><strong>${run.robot_path_count}</strong></div>
+                <div class="comparison-metric"><span>Max Live Fuel</span><strong>${run.max_live_fuel_count}</strong></div>
+                <div class="comparison-metric"><span>Runtime</span><strong>${run.runtime_seconds}s</strong></div>
+            </div>`;
+        }).join('');
+
+        const activeRun = analysisRuns.find(run => run.key === activeKey) || analysisRuns[0];
+        analysisRunStatus.className = 'source-status success';
+        analysisRunStatus.textContent = `${activeRun.label} is active for playback and attribution.`;
+        loadPlaybackVideos(activeRun);
+    }
+
+    function setActiveAnalysisRun(runKey) {
+        return fetch('/api/select_analysis_run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ run_key: runKey })
+        })
+            .then(r => r.json().then(d => ({ ok: r.ok, d })))
+            .then(({ ok, d }) => {
+                if (!ok) throw new Error(d.error || 'Could not switch analysis run');
+                renderAnalysisRuns(d.analysis_runs, d.active_analysis_run);
+            });
     }
 
     function advanceToRoi(imageData, seconds) {
@@ -507,8 +577,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // ──── Start Processing ────
     startButton.addEventListener('click', () => {
         const processSeconds = Math.max(0, Number(processSecondsInput.value) || 0);
+        const trackerMode = selectedTrackerMode();
         savePerspectiveConfig()
-            .then(() => fetch('/api/set_roi', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ points, process_seconds: processSeconds }) }))
+            .then(() => fetch('/api/set_roi', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ points, process_seconds: processSeconds, tracker_mode: trackerMode })
+            }))
             .then(r => r.json()).then(d => {
                 if (d.success) { showPhase('phase-processing'); pollStatus(); }
             })
@@ -523,7 +598,8 @@ document.addEventListener('DOMContentLoaded', () => {
             fetch('/api/status').then(r => r.json()).then(d => {
                 const percent = d.total_frames > 0 ? Math.min(100, Math.round((d.progress / d.total_frames) * 100)) : 0;
                 document.getElementById('progress-bar').style.width = percent + '%';
-                document.getElementById('progress-text').innerText = `${percent}% (${d.progress}/${d.total_frames})`;
+                const statusSuffix = d.processing_status ? `\n${d.processing_status}` : '';
+                document.getElementById('progress-text').innerText = `${percent}% (${d.progress}/${d.total_frames})${statusSuffix}`;
                 if (d.current_fuel_count !== undefined) document.getElementById('live-fuel-count').innerText = d.current_fuel_count;
                 if (d.robot_path_count !== undefined) document.getElementById('live-robot-path-count').innerText = d.robot_path_count;
                 if (d.preview_available) {
@@ -534,16 +610,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (d.is_finished) {
                     clearInterval(interval);
                     showPhase('phase-playback');
-                    document.getElementById('video-source').src = '/static/output.mp4?t=' + Date.now();
-                    document.getElementById('video-player').load();
-                    document.getElementById('yolo-debug-source').src = '/static/yolo_debug.mp4?t=' + Date.now();
-                    document.getElementById('yolo-debug-player').load();
-                    document.getElementById('projection-source').src = '/static/robot_projection.mp4?t=' + Date.now();
-                    document.getElementById('projection-player').load();
+                    renderAnalysisRuns(d.analysis_runs, d.active_analysis_run);
                 }
             });
         }, 1000);
     }
+
+    analysisRunSelect.addEventListener('change', () => {
+        const runKey = analysisRunSelect.value;
+        if (!runKey) return;
+        setActiveAnalysisRun(runKey).catch(error => {
+            analysisRunStatus.className = 'source-status error';
+            analysisRunStatus.textContent = error.message || 'Could not switch analysis run.';
+        });
+    });
 
     // ──── Attribution ────
     document.getElementById('btn-continue-attribution').addEventListener('click', () => {

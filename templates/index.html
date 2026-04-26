@@ -94,6 +94,29 @@
                 <span class="field-hint">seconds &middot; 0 = full video</span>
             </div>
 
+            <div class="tracker-panel">
+                <div class="tracker-panel-header">
+                    <div>
+                        <h3>Tracker Mode</h3>
+                        <p>Choose one tracker, or run both for an A/B comparison on the same clip.</p>
+                    </div>
+                </div>
+                <div class="tracker-mode-group">
+                    <label class="tracker-mode-option">
+                        <input type="radio" name="tracker-mode" value="botsort" checked />
+                        <span>BoT-SORT</span>
+                    </label>
+                    <label class="tracker-mode-option">
+                        <input type="radio" name="tracker-mode" value="bytetrack" />
+                        <span>ByteTrack</span>
+                    </label>
+                    <label class="tracker-mode-option">
+                        <input type="radio" name="tracker-mode" value="compare" />
+                        <span>Compare Both</span>
+                    </label>
+                </div>
+            </div>
+
             <div class="calibration-panel">
                 <div class="calibration-header">
                     <div>
@@ -167,6 +190,14 @@
         <div id="phase-playback" class="card">
             <h2>4 &middot; Playback</h2>
             <p>Analysis complete. Review the annotated video below.</p>
+            <div id="analysis-run-panel" class="analysis-run-panel" style="display:none;">
+                <div class="analysis-run-toolbar">
+                    <label class="field-label" for="analysis-run-select">Playback Tracker</label>
+                    <select id="analysis-run-select" class="frame-input"></select>
+                </div>
+                <p id="analysis-run-status" class="source-status"></p>
+                <div id="analysis-run-summary" class="comparison-grid"></div>
+            </div>
             <div class="stream-container">
                 <video id="video-player" controls style="width:100%; border-radius:var(--radius);">
                     <source id="video-source" src="" type="video/mp4">
