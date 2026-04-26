@@ -109,6 +109,7 @@ class State:
     robot_crops = {}
     robot_scores = defaultdict(int)
     total_scored_fuel = 0
+    score_timeline = []
     final_team_scores = defaultdict(int)
     match_alliances = {"red": [], "blue": []}
     video_path = project_path("static", "downloads", "youtube_pJjdRO_7KsU.mp4")
@@ -635,6 +636,7 @@ def reset_analysis_state():
     State.robot_crops = {}
     State.robot_scores = defaultdict(int)
     State.total_scored_fuel = 0
+    State.score_timeline = []
     State.final_team_scores = defaultdict(int)
     State.robot_paths = []
     State.robot_path_count = 0
@@ -1239,6 +1241,13 @@ def run_analysis_pass(tracker_key, progress_offset, per_pass_frame_limit):
                     source_robot_id = calculate_trajectory_and_attribute(f_id, fuel_history[f_id], robot_history)
                     if source_robot_id is not None:
                         State.robot_scores[source_robot_id] += 1
+                    State.score_timeline.append({
+                        "time": round(frame_count / fps, 2),
+                        "frame": frame_count,
+                        "fuel_id": int(f_id),
+                        "robot_id": int(source_robot_id) if source_robot_id is not None else None,
+                        "total": State.total_scored_fuel,
+                    })
 
             color = (0, 255, 0) if f_id in scored_fuel_ids else (0, 0, 255)
             cv2.rectangle(display_frame, (fx1, fy1), (fx2, fy2), color, 2)
@@ -1430,9 +1439,32 @@ def api_submit_attribution():
             
     State.final_team_scores = final_scores
     
+    # Build per-team timeline from score events + mapping
+    robot_to_team = {}
+    for r_id_str, team_num_str in team_mapping.items():
+        try:
+            robot_to_team[int(r_id_str)] = int(team_num_str)
+        except ValueError:
+            pass
+
+    team_timeline = []
+    team_running = defaultdict(int)
+    for event in State.score_timeline:
+        rid = event.get("robot_id")
+        team = robot_to_team.get(rid) if rid is not None else None
+        label = f"Team {team}" if team else "Unattributed"
+        team_running[label] += 1
+        team_timeline.append({
+            "time": event["time"],
+            "team": label,
+            "team_total": team_running[label],
+            "cumulative": event["total"],
+        })
+
     return jsonify({
         "final_scores": dict(final_scores),
-        "unattributed": unattributed
+        "unattributed": unattributed,
+        "score_timeline": team_timeline,
     })
 
 if __name__ == '__main__':

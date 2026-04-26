@@ -3,6 +3,7 @@
 runs_gpu/*
 runs/*
 datasets/
+outputs/
 
 # Dev environment related
 .vscode/

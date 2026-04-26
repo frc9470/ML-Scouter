@@ -648,6 +648,124 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    // ──── Chart renderer ────
+    const CHART_COLORS = ['#3b82f6','#ef4444','#22c55e','#f59e0b','#a855f7','#ec4899','#14b8a6','#f97316'];
+
+    function drawScoreChart(timeline) {
+        const canvas = document.getElementById('score-chart');
+        const dpr = window.devicePixelRatio || 1;
+        const rect = canvas.parentElement.getBoundingClientRect();
+        const W = rect.width - 32;  // account for container padding
+        const H = 220;
+        canvas.width = W * dpr;
+        canvas.height = H * dpr;
+        canvas.style.width = W + 'px';
+        canvas.style.height = H + 'px';
+        const ctx = canvas.getContext('2d');
+        ctx.scale(dpr, dpr);
+
+        if (!timeline || !timeline.length) {
+            ctx.fillStyle = '#71717a';
+            ctx.font = '13px Inter, system-ui, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('No scoring events recorded', W / 2, H / 2);
+            return;
+        }
+
+        const pad = { top: 16, right: 16, bottom: 36, left: 40 };
+        const cw = W - pad.left - pad.right;
+        const ch = H - pad.top - pad.bottom;
+
+        const maxTime = timeline[timeline.length - 1].time || 1;
+        const maxScore = timeline[timeline.length - 1].cumulative || 1;
+
+        // Collect unique teams
+        const teams = [...new Set(timeline.map(e => e.team))];
+
+        // Build per-team series as step data: [{time, total}]
+        const series = {};
+        teams.forEach(t => { series[t] = [{ time: 0, total: 0 }]; });
+        timeline.forEach(e => { series[e.team].push({ time: e.time, total: e.team_total }); });
+        // Extend each series to maxTime
+        teams.forEach(t => {
+            const s = series[t];
+            s.push({ time: maxTime, total: s[s.length - 1].total });
+        });
+
+        function x(t) { return pad.left + (t / maxTime) * cw; }
+        function y(v) { return pad.top + ch - (v / maxScore) * ch; }
+
+        // Grid lines
+        ctx.strokeStyle = '#27272a';
+        ctx.lineWidth = 1;
+        const yTicks = Math.min(maxScore, 6);
+        for (let i = 0; i <= yTicks; i++) {
+            const val = Math.round((maxScore / yTicks) * i);
+            const yy = y(val);
+            ctx.beginPath(); ctx.moveTo(pad.left, yy); ctx.lineTo(W - pad.right, yy); ctx.stroke();
+            ctx.fillStyle = '#71717a';
+            ctx.font = '11px Inter, system-ui, sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText(val, pad.left - 6, yy + 4);
+        }
+
+        // X axis labels
+        const xTicks = 5;
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#71717a';
+        for (let i = 0; i <= xTicks; i++) {
+            const t = (maxTime / xTicks) * i;
+            const xx = x(t);
+            ctx.fillText(t.toFixed(0) + 's', xx, H - pad.bottom + 18);
+            ctx.beginPath(); ctx.moveTo(xx, pad.top); ctx.lineTo(xx, pad.top + ch); ctx.stroke();
+        }
+
+        // Draw cumulative line (background)
+        ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x(0), y(0));
+        timeline.forEach(e => { ctx.lineTo(x(e.time), y(e.cumulative - 1)); ctx.lineTo(x(e.time), y(e.cumulative)); });
+        ctx.lineTo(x(maxTime), y(timeline[timeline.length - 1].cumulative));
+        ctx.stroke();
+
+        // Draw per-team step lines
+        teams.forEach((team, i) => {
+            const color = CHART_COLORS[i % CHART_COLORS.length];
+            const pts = series[team];
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            pts.forEach((p, j) => {
+                if (j === 0) { ctx.moveTo(x(p.time), y(p.total)); return; }
+                ctx.lineTo(x(p.time), y(pts[j - 1].total));  // horizontal
+                ctx.lineTo(x(p.time), y(p.total));            // vertical step
+            });
+            ctx.stroke();
+
+            // Score dots
+            ctx.fillStyle = color;
+            pts.forEach((p, j) => {
+                if (j === 0 || j === pts.length - 1) return;
+                ctx.beginPath(); ctx.arc(x(p.time), y(p.total), 3, 0, Math.PI * 2); ctx.fill();
+            });
+        });
+
+        // Legend
+        const legendY = H - 8;
+        let legendX = pad.left;
+        ctx.font = '11px Inter, system-ui, sans-serif';
+        ctx.textAlign = 'left';
+        teams.forEach((team, i) => {
+            const color = CHART_COLORS[i % CHART_COLORS.length];
+            ctx.fillStyle = color;
+            ctx.fillRect(legendX, legendY - 8, 10, 10);
+            ctx.fillStyle = '#a1a1aa';
+            ctx.fillText(team, legendX + 14, legendY);
+            legendX += ctx.measureText(team).width + 28;
+        });
+    }
+
     // ──── Final Report ────
     document.getElementById('btn-submit-scores').addEventListener('click', () => {
         const inputs = document.querySelectorAll('.input-field');
@@ -663,6 +781,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
                 html += `<div class="score-row" style="opacity:0.7"><span>Unattributed / Manual</span><span>${d.unattributed}</span></div>`;
                 container.innerHTML = html;
+
+                // Render scoring timeline chart
+                requestAnimationFrame(() => drawScoreChart(d.score_timeline));
             });
     });
 });
