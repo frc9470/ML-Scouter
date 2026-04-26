@@ -2,6 +2,7 @@
 *.mp4
 runs_gpu/*
 runs/*
+datasets/
 
 # Dev environment related
 .vscode/
@@ -9,3 +10,7 @@ runs/*
 .env.*
 !.env.example
 .DS_Store
+
+__pycache__/
+*.pyc
+yolo11n.pt

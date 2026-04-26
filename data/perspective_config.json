@@ -1,0 +1,146 @@
+{
+  "field_size": [
+    1379,
+    650
+  ],
+  "views": {
+    "full": {
+      "label": "Full top",
+      "enabled": true,
+      "source_points": [
+        [
+          296.0,
+          390.0
+        ],
+        [
+          1714.0,
+          382.0
+        ],
+        [
+          1914.0,
+          463.0
+        ],
+        [
+          80.0,
+          490.0
+        ]
+      ],
+      "field_points": [
+        [
+          0.0,
+          0.0
+        ],
+        [
+          1379.0,
+          0.0
+        ],
+        [
+          1379.0,
+          271.0
+        ],
+        [
+          0.0,
+          271.0
+        ]
+      ],
+      "point_labels": [
+        "top-left field corner",
+        "top-right field corner",
+        "lower-right tower-base corner",
+        "lower-left tower-base corner"
+      ]
+    },
+    "left": {
+      "label": "Left tower",
+      "enabled": true,
+      "source_points": [
+        [
+          30.0,
+          981.0
+        ],
+        [
+          332.0,
+          984.0
+        ],
+        [
+          578.0,
+          1037.0
+        ],
+        [
+          163.0,
+          1052.0
+        ]
+      ],
+      "field_points": [
+        [
+          0.0,
+          0.0
+        ],
+        [
+          336.0,
+          0.0
+        ],
+        [
+          336.0,
+          386.0
+        ],
+        [
+          96.0,
+          402.0
+        ]
+      ],
+      "point_labels": [
+        "top-left landmark",
+        "top-right landmark",
+        "bottom-right tower-base landmark",
+        "bottom-left tower-base landmark"
+      ]
+    },
+    "right": {
+      "label": "Right tower",
+      "enabled": true,
+      "source_points": [
+        [
+          1822.0,
+          1045.0
+        ],
+        [
+          1506.0,
+          1027.0
+        ],
+        [
+          1288.0,
+          1058.0
+        ],
+        [
+          1703.0,
+          1077.0
+        ]
+      ],
+      "field_points": [
+        [
+          1379.0,
+          0.0
+        ],
+        [
+          1043.0,
+          0.0
+        ],
+        [
+          1043.0,
+          386.0
+        ],
+        [
+          1283.0,
+          402.0
+        ]
+      ],
+      "point_labels": [
+        "top-right field landmark",
+        "top-left mirrored landmark",
+        "bottom-left tower-base landmark",
+        "bottom-right tower-base landmark"
+      ]
+    }
+  }
+}

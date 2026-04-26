@@ -17,11 +17,29 @@
         <!-- Phase 1: Select Match Video -->
         <div id="phase-source" class="card active">
             <h2>1 &middot; Select Match Video</h2>
-            <p>Paste a YouTube URL directly, or search for a match via The Blue Alliance.</p>
+            <p>Use the sample match below, paste a YouTube URL, or search via The Blue Alliance.</p>
+
+            <div id="sample-banner" class="sample-banner" style="display:none;">
+                <div class="sample-banner-info">
+                    <span class="sample-banner-label">Sample loaded</span>
+                    <span id="sample-banner-name" class="sample-banner-name"></span>
+                </div>
+                <button id="btn-use-sample" class="btn primary" type="button">Use Sample Video</button>
+            </div>
 
             <div class="source-panel">
                 <input id="youtube-url" class="source-input" type="url" placeholder="YouTube match video URL" />
                 <button id="btn-load-youtube" class="btn secondary">Load Video</button>
+            </div>
+            <div class="alliance-panel">
+                <label class="alliance-input red">
+                    <span>Red</span>
+                    <input id="manual-red-teams" class="source-input" type="text" placeholder="Team numbers, comma separated" />
+                </label>
+                <label class="alliance-input blue">
+                    <span>Blue</span>
+                    <input id="manual-blue-teams" class="source-input" type="text" placeholder="Team numbers, comma separated" />
+                </label>
             </div>
             <p id="source-status" class="source-status"></p>
 
@@ -76,6 +94,36 @@
                 <span class="field-hint">seconds &middot; 0 = full video</span>
             </div>
 
+            <div class="calibration-panel">
+                <div class="calibration-header">
+                    <div>
+                        <h3>Perspective Calibration</h3>
+                        <p>Click each view's four named landmarks in order.</p>
+                    </div>
+                    <button id="btn-save-calibration" class="btn secondary" type="button">Save Calibration</button>
+                </div>
+                <div class="calibration-grid">
+                    <button class="calibration-view" type="button" data-view="full">
+                        <span>Full top</span>
+                        <strong id="calibration-count-full">0/4</strong>
+                    </button>
+                    <button class="calibration-view" type="button" data-view="left">
+                        <span>Left tower</span>
+                        <strong id="calibration-count-left">0/4</strong>
+                    </button>
+                    <button class="calibration-view" type="button" data-view="right">
+                        <span>Right tower</span>
+                        <strong id="calibration-count-right">0/4</strong>
+                    </button>
+                </div>
+                <div class="calibration-actions">
+                    <button id="btn-calibration-done" class="btn secondary" type="button">Done</button>
+                    <button id="btn-clear-calibration-view" class="btn secondary" type="button">Clear View</button>
+                    <button id="btn-reset-calibration" class="btn secondary" type="button">Reset Defaults</button>
+                </div>
+                <p id="calibration-status" class="source-status"></p>
+            </div>
+
             <div class="canvas-container">
                 <img id="first-frame" src="" alt="First Frame" />
                 <canvas id="roi-canvas"></canvas>
@@ -108,6 +156,10 @@
                     <h3>Fuel Detected</h3>
                     <p id="live-fuel-count">0</p>
                 </div>
+                <div class="stat-box" style="text-align:center;">
+                    <h3>Robot Paths</h3>
+                    <p id="live-robot-path-count">0</p>
+                </div>
             </div>
         </div>
 
@@ -121,6 +173,20 @@
                     Your browser does not support the video tag.
                 </video>
             </div>
+            <h3 class="playback-subtitle">YOLO Model View</h3>
+            <div class="stream-container yolo-debug-container">
+                <video id="yolo-debug-player" controls style="width:100%; border-radius:var(--radius);">
+                    <source id="yolo-debug-source" src="" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+            </div>
+            <h3 class="playback-subtitle">Robot Projection View</h3>
+            <div class="stream-container">
+                <video id="projection-player" controls style="width:100%; border-radius:var(--radius);">
+                    <source id="projection-source" src="" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+            </div>
             <div class="actions">
                 <button id="btn-continue-attribution" class="btn primary">Continue to Attribution</button>
             </div>
@@ -130,6 +196,7 @@
         <div id="phase-results" class="card">
             <h2>5 &middot; Score Attribution</h2>
             <p>Assign team numbers to each tracked robot.</p>
+            <p id="ocr-status" class="source-status"></p>
             <div id="robot-grid" class="grid"></div>
             <div class="actions">
                 <button id="btn-submit-scores" class="btn primary">Finalize Report</button>

@@ -2,6 +2,7 @@ import os
 import cv2
 import base64
 import json
+import re
 import threading
 import numpy as np
 import yt_dlp
@@ -11,14 +12,36 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.parse import urlparse
 from ultralytics import YOLO
+from perspective_tracking import (
+    FieldPathTracker,
+    build_camera_views,
+    draw_field_overlay,
+    load_perspective_config,
+    make_field_canvas,
+    merge_multiview_detections,
+    paste_field_overlay,
+    project_detections,
+    save_perspective_config,
+)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def project_path(*parts):
+    return os.path.join(BASE_DIR, *parts)
 
 app = Flask(__name__)
-os.makedirs('static/crops', exist_ok=True)
-os.makedirs('static/downloads', exist_ok=True)
+os.makedirs(project_path('static', 'crops'), exist_ok=True)
+os.makedirs(project_path('static', 'downloads'), exist_ok=True)
+os.makedirs(project_path('data'), exist_ok=True)
 
 TBA_BASE_URL = "https://www.thebluealliance.com/api/v3"
+PERSPECTIVE_CONFIG_PATH = project_path("data", "perspective_config.json")
+FUEL_INFERENCE_SIZE = 640
+ROBOT_INFERENCE_SIZE = 640
+YOLO_DEBUG_SIZE = 640
 
-def write_local_env_value(key, value, path=".env.local"):
+def write_local_env_value(key, value, path=None):
+    path = path or project_path(".env.local")
     lines = []
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as env_file:
@@ -36,7 +59,8 @@ def write_local_env_value(key, value, path=".env.local"):
     with open(path, "w", encoding="utf-8") as env_file:
         env_file.writelines(lines)
 
-def load_local_env(path=".env.local"):
+def load_local_env(path=None):
+    path = path or project_path(".env.local")
     if not os.path.exists(path):
         return
 
@@ -65,11 +89,19 @@ class State:
     robot_scores = defaultdict(int)
     total_scored_fuel = 0
     final_team_scores = defaultdict(int)
-    video_path = "match_video.mp4"
+    match_alliances = {"red": [], "blue": []}
+    video_path = project_path("static", "downloads", "youtube_pJjdRO_7KsU.mp4")
     roi_frame_seconds = 0.0
     process_seconds = 20.0
     preview_frame_jpeg = None
     preview_lock = threading.Lock()
+    model_status = {}
+    perspective_config = load_perspective_config(PERSPECTIVE_CONFIG_PATH)
+    robot_paths = []
+    robot_path_count = 0
+    robot_alliances = {}
+    ocr_assignments = {}
+    ocr_status = {"enabled": False, "message": "OCR has not run yet."}
 
 import argparse
 
@@ -77,11 +109,12 @@ parser = argparse.ArgumentParser(description="ML-based shot counter for FRC REBU
 parser.add_argument("--model", default=None, help="Path to the unified YOLO model")
 parser.add_argument("--fuel-model", default=None, help="Path to the fuel YOLO model")
 parser.add_argument("--robot-model", default=None, help="Path to the robot YOLO model")
-parser.add_argument("--video", default="match_video.mp4", help="Path to the match video")
+parser.add_argument("--video", default=None, help="Path to the match video")
 
 args, _unknown_args = parser.parse_known_args()
 
-State.video_path = args.video
+if args.video:
+    State.video_path = args.video
 
 def is_youtube_url(url):
     parsed = urlparse(url)
@@ -91,7 +124,7 @@ def is_youtube_url(url):
     )
 
 def download_youtube_video(url):
-    output_template = os.path.abspath("static/downloads/youtube_%(id)s.%(ext)s")
+    output_template = project_path("static", "downloads", "youtube_%(id)s.%(ext)s")
     options = {
         "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "merge_output_format": "mp4",
@@ -205,25 +238,364 @@ def update_live_preview(frame, frame_count, stride=5, max_width=960):
     with State.preview_lock:
         State.preview_frame_jpeg = buffer.tobytes()
 
+def letterbox_frame(frame, size):
+    height, width = frame.shape[:2]
+    scale = min(size / width, size / height)
+    resized_width = int(round(width * scale))
+    resized_height = int(round(height * scale))
+    resized = cv2.resize(frame, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
+    canvas = np.full((size, size, 3), 114, dtype=np.uint8)
+    pad_x = (size - resized_width) // 2
+    pad_y = (size - resized_height) // 2
+    canvas[pad_y:pad_y + resized_height, pad_x:pad_x + resized_width] = resized
+    return canvas, scale, pad_x, pad_y
+
+def draw_yolo_debug_frame(frame, fuel_boxes, fuel_ids, fuel_confs, robot_boxes, robot_ids, robot_confs, robot_classes, robot_names):
+    debug_frame, scale, pad_x, pad_y = letterbox_frame(frame, YOLO_DEBUG_SIZE)
+
+    def map_box(box):
+        x1, y1, x2, y2 = [float(value) for value in box]
+        return (
+            int(round(x1 * scale + pad_x)),
+            int(round(y1 * scale + pad_y)),
+            int(round(x2 * scale + pad_x)),
+            int(round(y2 * scale + pad_y)),
+        )
+
+    for box, fuel_id, confidence in zip(fuel_boxes, fuel_ids, fuel_confs):
+        x1, y1, x2, y2 = map_box(box)
+        color = (0, 255, 255)
+        cv2.rectangle(debug_frame, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(
+            debug_frame,
+            f"fuel {int(fuel_id)} {confidence:.2f}",
+            (x1, max(16, y1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            color,
+            1,
+        )
+
+    for box, robot_id, confidence, class_id in zip(robot_boxes, robot_ids, robot_confs, robot_classes):
+        class_name = robot_names.get(int(class_id), "robot")
+        color = (128, 0, 128)
+        if class_name == "red":
+            color = (0, 0, 255)
+        elif class_name == "blue":
+            color = (255, 0, 0)
+        x1, y1, x2, y2 = map_box(box)
+        cv2.rectangle(debug_frame, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(
+            debug_frame,
+            f"{class_name} {int(robot_id)} {confidence:.2f}",
+            (x1, max(16, y1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            color,
+            1,
+        )
+
+    cv2.putText(
+        debug_frame,
+        f"YOLO debug {YOLO_DEBUG_SIZE}x{YOLO_DEBUG_SIZE} | fuel {len(fuel_boxes)} | robots {len(robot_boxes)}",
+        (12, 24),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (255, 255, 255),
+        2,
+    )
+    return debug_frame
+
+def projection_video_size(config):
+    width, height = config.get("field_size", [1379, 650])
+    width = int(width)
+    height = int(height)
+    if width % 2:
+        width += 1
+    if height % 2:
+        height += 1
+    return width, height
+
+def draw_projection_debug_frame(field_canvas, frame_count, raw_detections, merged_detections, paths, output_size):
+    debug_frame = field_canvas.copy()
+    view_colors = {
+        "full": (220, 180, 80),
+        "left": (80, 190, 250),
+        "right": (250, 140, 80),
+        "fused": (80, 240, 120),
+    }
+
+    for detection in raw_detections:
+        color = view_colors.get(detection.view, (170, 170, 170))
+        cv2.circle(debug_frame, detection.field_point, 16, color, 1)
+        cv2.putText(
+            debug_frame,
+            detection.view,
+            (detection.field_point[0] + 10, detection.field_point[1] + 14),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            color,
+            1,
+        )
+
+    draw_field_overlay(debug_frame, paths, merged_detections)
+    cv2.putText(
+        debug_frame,
+        f"Robot projection | frame {frame_count} | raw projected {len(raw_detections)} | merged {len(merged_detections)} | paths {len(paths)}",
+        (12, 24),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (245, 245, 245),
+        2,
+    )
+
+    output_width, output_height = output_size
+    height, width = debug_frame.shape[:2]
+    if (width, height) == output_size:
+        return debug_frame
+
+    padded = np.full((output_height, output_width, 3), (30, 35, 38), dtype=np.uint8)
+    padded[:height, :width] = debug_frame
+    return padded
+
+_ocr_reader = None
+_ocr_error = None
+
+def get_ocr_reader():
+    global _ocr_reader, _ocr_error
+    if _ocr_reader is not None:
+        return _ocr_reader
+    if _ocr_error is not None:
+        return None
+
+    try:
+        import easyocr
+        _ocr_reader = easyocr.Reader(['en'], recog_network='english_g2', user_network_directory=None)
+    except Exception as e:
+        _ocr_error = str(e)
+        return None
+    return _ocr_reader
+
+def preprocess_robot_crop_for_ocr(crop):
+    if crop is None or crop.size == 0:
+        return None
+    searchbox = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    gaussian = cv2.GaussianBlur(searchbox, (3, 3), 0)
+    searchbox = cv2.addWeighted(searchbox, 2.0, gaussian, -1.0, 0)
+    return cv2.resize(searchbox, None, fx=2, fy=2, interpolation=cv2.INTER_LANCZOS4)
+
+def normalize_team_list(values):
+    teams = []
+    for value in values or []:
+        digits = re.sub(r"\D", "", str(value))
+        if digits:
+            teams.append(digits)
+    return teams
+
+def fuzzy_match_team(text, options):
+    if not text or not options:
+        return None, 0
+    digits = re.sub(r"\D", "", str(text))
+    if not digits:
+        return None, 0
+    if digits in options:
+        return digits, 100
+
+    try:
+        from rapidfuzz import fuzz, process
+        match = process.extractOne(digits, options, scorer=fuzz.ratio)
+        if match:
+            return match[0], int(match[1])
+    except Exception:
+        pass
+
+    best_team = None
+    best_score = 0
+    for team in options:
+        common = len(set(digits) & set(team))
+        score = int((common / max(len(digits), len(team))) * 100)
+        if score > best_score:
+            best_team = team
+            best_score = score
+    return best_team, best_score
+
+def run_robot_ocr_assignment(robot_crops, robot_alliances, match_alliances):
+    reader = get_ocr_reader()
+    if reader is None:
+        reason = _ocr_error or "easyocr is not available"
+        return {}, {
+            "enabled": False,
+            "message": f"OCR unavailable: {reason}. Install easyocr and rapidfuzz, then rerun analysis.",
+        }
+
+    team_options = {
+        "red": normalize_team_list(match_alliances.get("red")),
+        "blue": normalize_team_list(match_alliances.get("blue")),
+    }
+    assignments = {}
+
+    for robot_id, crop in robot_crops.items():
+        processed = preprocess_robot_crop_for_ocr(crop)
+        if processed is None:
+            continue
+
+        try:
+            results = reader.readtext(processed, detail=1, allowlist="0123456789")
+        except Exception as e:
+            assignments[str(robot_id)] = {
+                "team": None,
+                "text": "",
+                "score": 0,
+                "alliance": robot_alliances.get(robot_id, "unknown"),
+                "error": str(e),
+            }
+            continue
+
+        texts = []
+        confidences = []
+        for result in results:
+            text = str(result[1]) if len(result) > 1 else ""
+            digits = re.sub(r"\D", "", text)
+            if not digits:
+                continue
+            texts.append(digits)
+            confidences.append(float(result[2]) if len(result) > 2 else 0.0)
+
+        candidate_text = max(texts, key=len) if texts else ""
+        alliance = robot_alliances.get(robot_id, "unknown")
+        options = team_options.get(alliance, []) if alliance in team_options else []
+        if not options:
+            options = sorted(set(team_options["red"] + team_options["blue"]))
+        matched_team, match_score = fuzzy_match_team(candidate_text, options)
+        accepted = bool(matched_team and match_score >= 70)
+
+        assignments[str(robot_id)] = {
+            "team": int(matched_team) if accepted else None,
+            "candidate_team": int(matched_team) if matched_team else None,
+            "text": candidate_text,
+            "score": match_score,
+            "ocr_confidence": max(confidences) if confidences else 0,
+            "alliance": alliance,
+            "accepted": accepted,
+        }
+
+    if not team_options["red"] and not team_options["blue"]:
+        message = "OCR ran, but no TBA alliance team list is available for fuzzy assignment."
+    else:
+        accepted_count = sum(1 for assignment in assignments.values() if assignment.get("accepted"))
+        message = f"OCR ran for {len(assignments)} robot crops; {accepted_count} team suggestions accepted."
+
+    return assignments, {"enabled": True, "message": message}
+
 # Initialize Models
 unified_model = None
 fuel_model = None
 robot_model = None
 
-if args.fuel_model and args.robot_model:
+FUEL_CLASS_ALIASES = {"fuel", "ball", "flying_fuel", "flying fuel", "gamepiece", "game piece"}
+ROBOT_CLASS_ALIASES = {"robot", "robots", "bot"}
+COCO_CLASS_IDS = {"robot": 0, "fuel": 32}
+
+def model_names(model):
+    names = getattr(model, "names", {}) or {}
+    if isinstance(names, dict):
+        return {int(k): str(v) for k, v in names.items()}
+    return {index: str(name) for index, name in enumerate(names)}
+
+def normalized_model_names(model):
+    return {class_id: name.strip().lower() for class_id, name in model_names(model).items()}
+
+def is_coco_model(model):
+    names = set(normalized_model_names(model).values())
+    return "person" in names and "sports ball" in names
+
+def class_filter_for(model, target):
+    if is_coco_model(model):
+        return [COCO_CLASS_IDS[target]]
+    return None
+
+def class_id_for(model, target):
+    if is_coco_model(model):
+        return COCO_CLASS_IDS[target]
+
+    aliases = FUEL_CLASS_ALIASES if target == "fuel" else ROBOT_CLASS_ALIASES
+    for class_id, name in normalized_model_names(model).items():
+        if name in aliases:
+            return class_id
+    return None
+
+def class_matches_target(model, target, class_id):
+    if is_coco_model(model):
+        return int(class_id) == COCO_CLASS_IDS[target]
+
+    name = normalized_model_names(model).get(int(class_id), "")
+    if target == "robot":
+        return (
+            name in ROBOT_CLASS_ALIASES
+            or "robot" in name
+            or "blue" in name
+            or "red" in name
+        )
+    return name in FUEL_CLASS_ALIASES or "fuel" in name or "ball" in name
+
+def resolve_existing_path(path):
+    if not path:
+        return None
+    candidates = [path]
+    if not os.path.isabs(path):
+        candidates.append(project_path(path))
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    return None
+
+def load_yolo(path, label):
+    model = YOLO(path)
+    names = ", ".join(f"{class_id}:{name}" for class_id, name in model_names(model).items())
+    print(f"Loaded {label} model: {path} [{names}]")
+    return model
+
+# Resolve model paths: explicit flags > bundled AutoScouter robot model > uploaded models/ dir > unified > YOLO11n.
+_fuel_path = resolve_existing_path(args.fuel_model) or resolve_existing_path(
+    project_path("models", "flying_fuel_best.pt")
+)
+_robot_path = (
+    resolve_existing_path(args.robot_model)
+    or resolve_existing_path(project_path("models", "autoscouter_ventura_best_2.pt"))
+    or resolve_existing_path(project_path("models", "robot_best.pt"))
+)
+
+if _fuel_path and _robot_path:
     try:
-        fuel_model = YOLO(args.fuel_model)
-        robot_model = YOLO(args.robot_model)
+        fuel_model = load_yolo(_fuel_path, "fuel")
+        robot_model = load_yolo(_robot_path, "robot")
+        State.model_status = {
+            "mode": "separate",
+            "fuel_model": _fuel_path,
+            "robot_model": _robot_path,
+            "fuel_names": model_names(fuel_model),
+            "robot_names": model_names(robot_model),
+        }
     except Exception as e:
-        print(f"ERROR: Could not load individual fuel and robot models, defaulting to YOLO11n: {e}")
-        unified_model = YOLO('yolo11n.pt')
+        print(f"ERROR: Could not load uploaded fuel/robot models: {e}")
+        unified_model = load_yolo(resolve_existing_path("yolo11n.pt") or "yolo11n.pt", "COCO fallback")
+        State.model_status = {"mode": "coco_fallback", "error": str(e), "model": "yolo11n.pt"}
 else:
-    model_path = args.model if args.model else "unified.pt"
+    model_path = resolve_existing_path(args.model) or resolve_existing_path("unified.pt")
     try:
-        unified_model = YOLO(model_path) 
-    except Exception:
-        print(f"ERROR: Could not load unified model. Defaulting to YOLO11n.")
-        unified_model = YOLO('yolo11n.pt')
+        if not model_path:
+            raise FileNotFoundError("No uploaded separate models or unified.pt found")
+        unified_model = load_yolo(model_path, "unified")
+        State.model_status = {
+            "mode": "unified",
+            "model": model_path,
+            "names": model_names(unified_model),
+        }
+    except Exception as e:
+        print(f"ERROR: Could not load custom model. Defaulting to YOLO11n: {e}")
+        fallback_path = resolve_existing_path("yolo11n.pt") or "yolo11n.pt"
+        unified_model = load_yolo(fallback_path, "COCO fallback")
+        State.model_status = {"mode": "coco_fallback", "error": str(e), "model": fallback_path}
 
 # --- KINEMATIC HELPERS ---
 def is_airborne(history, min_frames=3, velocity_threshold=2.0):
@@ -339,6 +711,15 @@ def api_set_video_source():
     State.robot_scores = defaultdict(int)
     State.total_scored_fuel = 0
     State.final_team_scores = defaultdict(int)
+    State.robot_paths = []
+    State.robot_path_count = 0
+    State.robot_alliances = {}
+    State.ocr_assignments = {}
+    State.ocr_status = {"enabled": False, "message": "OCR has not run yet."}
+    State.match_alliances = {
+        "red": normalize_team_list(data.get("red", [])),
+        "blue": normalize_team_list(data.get("blue", [])),
+    }
     with State.preview_lock:
         State.preview_frame_jpeg = None
 
@@ -461,12 +842,36 @@ def api_set_roi():
     State.robot_crops = {}
     State.robot_scores = defaultdict(int)
     State.total_scored_fuel = 0
+    State.robot_paths = []
+    State.robot_path_count = 0
+    State.robot_alliances = {}
+    State.ocr_assignments = {}
+    State.ocr_status = {"enabled": False, "message": "OCR has not run yet."}
     with State.preview_lock:
         State.preview_frame_jpeg = None
     
     # Start background processing thread
     threading.Thread(target=process_video_task).start()
     return jsonify({"success": True})
+
+@app.route('/api/perspective_config')
+def api_perspective_config():
+    return jsonify(State.perspective_config)
+
+@app.route('/api/set_perspective_config', methods=['POST'])
+def api_set_perspective_config():
+    if State.is_processing:
+        return jsonify({"error": "Cannot change perspective calibration while processing"}), 409
+
+    try:
+        State.perspective_config = save_perspective_config(
+            PERSPECTIVE_CONFIG_PATH,
+            request.json or {},
+        )
+    except Exception as e:
+        return jsonify({"error": f"Could not save perspective calibration: {e}"}), 400
+
+    return jsonify({"success": True, "config": State.perspective_config})
 
 def process_video_task():
     cap = cv2.VideoCapture(State.video_path if os.path.exists(State.video_path) else 0)
@@ -485,15 +890,22 @@ def process_video_task():
         State.total_frames = 1
     
     # Write directly to mp4 using avc1 codec (H264)
-    out_path = 'static/output.mp4'
+    out_path = project_path('static', 'output.mp4')
+    yolo_out_path = project_path('static', 'yolo_debug.mp4')
+    projection_out_path = project_path('static', 'robot_projection.mp4')
+    projection_size = projection_video_size(State.perspective_config)
     fourcc = cv2.VideoWriter_fourcc(*'avc1')
     out = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
+    yolo_out = cv2.VideoWriter(yolo_out_path, fourcc, fps, (YOLO_DEBUG_SIZE, YOLO_DEBUG_SIZE))
+    projection_out = cv2.VideoWriter(projection_out_path, fourcc, fps, projection_size)
     
     fuel_history = defaultdict(list)
     robot_history = defaultdict(list)
-    airborne_fuel_ids = set()
     scored_fuel_ids = set()
     frame_count = 0
+    camera_views = build_camera_views(State.perspective_config)
+    field_tracker = FieldPathTracker()
+    robot_class_names = model_names(unified_model if unified_model else robot_model)
     
     while True:
         ret, frame = cap.read()
@@ -507,65 +919,152 @@ def process_video_task():
         if State.roi_poly is not None:
             cv2.polylines(display_frame, [State.roi_poly], True, (255, 255, 255), 2)
 
-        robot_boxes_list, robot_ids_list = [], []
-        fuel_boxes_list, fuel_ids_list = [], []
+        robot_boxes_list, robot_ids_list, robot_conf_list, robot_class_list = [], [], [], []
+        fuel_boxes_list, fuel_ids_list, fuel_conf_list = [], [], []
 
         if unified_model:
             results = unified_model.track(
-                frame, persist=True, verbose=False, imgsz=320
+                frame, persist=True, verbose=False, imgsz=ROBOT_INFERENCE_SIZE
             )
             
-            robot_cls = 0 if unified_model.model_name in ['yolo11n.yaml', 'yolov8n.yaml'] else next((k for k, v in unified_model.names.items() if v == 'robot'), 1)
-            fuel_cls = 32 if unified_model.model_name in ['yolo11n.yaml', 'yolov8n.yaml'] else next((k for k, v in unified_model.names.items() if v == 'fuel'), 0)
+            robot_cls = class_id_for(unified_model, "robot")
+            fuel_cls = class_id_for(unified_model, "fuel")
 
             if results[0].boxes.id is not None:
                 boxes = results[0].boxes.xyxy.cpu().numpy()
                 ids = results[0].boxes.id.cpu().numpy().astype(int)
+                confidences = results[0].boxes.conf.cpu().numpy()
                 classes = results[0].boxes.cls.cpu().numpy().astype(int)
                 
-                for b, t_id, c in zip(boxes, ids, classes):
-                    if c == robot_cls:
+                for b, t_id, conf, c in zip(boxes, ids, confidences, classes):
+                    if (robot_cls is not None and c == robot_cls) or class_matches_target(unified_model, "robot", c):
                         robot_boxes_list.append(b)
                         robot_ids_list.append(t_id)
-                    elif c == fuel_cls:
+                        robot_conf_list.append(conf)
+                        robot_class_list.append(c)
+                    elif (fuel_cls is not None and c == fuel_cls) or class_matches_target(unified_model, "fuel", c):
                         fuel_boxes_list.append(b)
                         fuel_ids_list.append(t_id)
+                        fuel_conf_list.append(conf)
         else:
             fuel_results = fuel_model.track(
-                frame, persist=True, verbose=False, imgsz=320, classes=[32] if fuel_model.model_name in ['yolo11n.yaml', 'yolov8n.yaml'] else None
+                frame,
+                persist=True,
+                verbose=False,
+                imgsz=FUEL_INFERENCE_SIZE,
+                classes=class_filter_for(fuel_model, "fuel"),
             )
             robot_results = robot_model.track(
-                frame, persist=True, verbose=False, imgsz=320, classes=[0] if robot_model.model_name in ['yolo11n.yaml', 'yolov8n.yaml'] else None
+                frame,
+                persist=True,
+                verbose=False,
+                imgsz=ROBOT_INFERENCE_SIZE,
+                classes=class_filter_for(robot_model, "robot"),
             )
             
             if robot_results[0].boxes.id is not None:
                 boxes = robot_results[0].boxes.xyxy.cpu().numpy()
                 ids = robot_results[0].boxes.id.cpu().numpy().astype(int)
-                for b, t_id in zip(boxes, ids):
+                confidences = robot_results[0].boxes.conf.cpu().numpy()
+                classes = robot_results[0].boxes.cls.cpu().numpy().astype(int)
+                for b, t_id, conf, c in zip(boxes, ids, confidences, classes):
                     robot_boxes_list.append(b)
                     robot_ids_list.append(t_id)
+                    robot_conf_list.append(conf)
+                    robot_class_list.append(c)
                     
             if fuel_results[0].boxes.id is not None:
                 boxes = fuel_results[0].boxes.xyxy.cpu().numpy()
                 ids = fuel_results[0].boxes.id.cpu().numpy().astype(int)
-                for b, t_id in zip(boxes, ids):
+                confidences = fuel_results[0].boxes.conf.cpu().numpy()
+                for b, t_id, conf in zip(boxes, ids, confidences):
                     fuel_boxes_list.append(b)
                     fuel_ids_list.append(t_id)
+                    fuel_conf_list.append(conf)
 
         State.current_fuel_count = len(fuel_boxes_list)
+        yolo_debug_frame = draw_yolo_debug_frame(
+            frame,
+            fuel_boxes_list,
+            fuel_ids_list,
+            fuel_conf_list,
+            robot_boxes_list,
+            robot_ids_list,
+            robot_conf_list,
+            robot_class_list,
+            robot_class_names,
+        )
+
+        raw_field_detections = project_detections(
+            robot_boxes_list,
+            robot_ids_list,
+            robot_conf_list,
+            robot_class_list,
+            robot_class_names,
+            camera_views,
+        )
+        field_detections = merge_multiview_detections(raw_field_detections)
+        field_detections = field_tracker.update(frame_count, field_detections)
+        State.robot_path_count = len(field_tracker.all_paths())
+        field_canvas = make_field_canvas(State.perspective_config)
+        projection_debug_frame = draw_projection_debug_frame(
+            field_canvas,
+            frame_count,
+            raw_field_detections,
+            field_detections,
+            field_tracker.all_paths(),
+            projection_size,
+        )
+
+        projected_source_ids = {detection.source_id for detection in raw_field_detections}
+        for box, raw_id in zip(robot_boxes_list, robot_ids_list):
+            if int(raw_id) in projected_source_ids:
+                continue
+            rx1, ry1, rx2, ry2 = map(int, box)
+            cv2.rectangle(display_frame, (rx1, ry1), (rx2, ry2), (0, 180, 255), 2)
+            cv2.putText(
+                display_frame,
+                f"Raw robot {int(raw_id)}",
+                (rx1, max(20, ry1 - 10)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 180, 255),
+                2,
+            )
 
         # Process Robots
-        for box, r_id in zip(robot_boxes_list, robot_ids_list):
-            rx1, ry1, rx2, ry2 = map(int, box)
-            robot_history[r_id].append({'frame': frame_count, 'bbox': (rx1, ry1, rx2, ry2)})
+        for detection in field_detections:
+            r_id = detection.path_id
+            rx1, ry1, rx2, ry2 = detection.bbox
+            robot_history[r_id].append({
+                'frame': frame_count,
+                'bbox': detection.bbox,
+                'field_point': detection.field_point,
+                'color': detection.color,
+                'view': detection.view,
+            })
             
             if r_id not in State.robot_crops or frame_count % 30 == 0:
                 crop = frame[max(0, ry1-10):ry2+10, max(0, rx1-10):rx2+10]
                 if crop.size > 0:
                     State.robot_crops[r_id] = crop
+                    State.robot_alliances[r_id] = detection.color
 
-            cv2.rectangle(display_frame, (rx1, ry1), (rx2, ry2), (128, 0, 128), 3)
-            cv2.putText(display_frame, f"Robot {r_id}", (rx1, ry1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 0, 128), 2)
+            box_color = (128, 0, 128)
+            if detection.color == "red":
+                box_color = (0, 0, 255)
+            elif detection.color == "blue":
+                box_color = (255, 0, 0)
+            cv2.rectangle(display_frame, (rx1, ry1), (rx2, ry2), box_color, 3)
+            cv2.putText(
+                display_frame,
+                f"Robot {r_id} {detection.view}",
+                (rx1, max(20, ry1-10)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                box_color,
+                2,
+            )
 
         # Process FUEL
         for box, f_id in zip(fuel_boxes_list, fuel_ids_list):
@@ -573,47 +1072,48 @@ def process_video_task():
             cx = int((fx1 + fx2) / 2)
             cy = int((fy1 + fy2) / 2)
             fuel_history[f_id].append({'frame': frame_count, 'x': cx, 'y': cy, 'bbox': (fx1, fy1, fx2, fy2)})
-            
-            if f_id not in airborne_fuel_ids:
-                if is_airborne(fuel_history[f_id]):
-                    airborne_fuel_ids.add(f_id)
 
-            color = (0, 0, 255)
+            if f_id not in scored_fuel_ids and State.roi_poly is not None:
+                inside = cv2.pointPolygonTest(State.roi_poly, (cx, cy), False) >= 0
+                if inside:
+                    scored_fuel_ids.add(f_id)
+                    State.total_scored_fuel += 1
+                    source_robot_id = calculate_trajectory_and_attribute(f_id, fuel_history[f_id], robot_history)
+                    if source_robot_id is not None:
+                        State.robot_scores[source_robot_id] += 1
+
+            color = (0, 255, 0) if f_id in scored_fuel_ids else (0, 0, 255)
+            status_text = "SCORED" if f_id in scored_fuel_ids else f"FUEL {f_id}"
             cv2.rectangle(display_frame, (fx1, fy1), (fx2, fy2), color, 2)
-            
-            if f_id in airborne_fuel_ids:
-                color = (255, 0, 0)
-                status_text = f"FUEL {f_id}"
-                
-                if f_id not in scored_fuel_ids and State.roi_poly is not None:
-                    inside = cv2.pointPolygonTest(State.roi_poly, (cx, cy), False) >= 0
-                    if inside:
-                        scored_fuel_ids.add(f_id)
-                        State.total_scored_fuel += 1
-                        source_robot_id = calculate_trajectory_and_attribute(f_id, fuel_history[f_id], robot_history)
-                        if source_robot_id is not None:
-                            State.robot_scores[source_robot_id] += 1
+            cv2.putText(display_frame, status_text, (fx1, fy1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            pts = np.array([[pt['x'], pt['y']] for pt in fuel_history[f_id]], np.int32)
+            cv2.polylines(display_frame, [pts], False, color, 1)
 
-                if f_id in scored_fuel_ids:
-                    color = (0, 255, 0)
-                    status_text = "SCORED"
-                    
-                cv2.rectangle(display_frame, (fx1, fy1), (fx2, fy2), color, 2)
-                cv2.putText(display_frame, status_text, (fx1, fy1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                pts = np.array([[pt['x'], pt['y']] for pt in fuel_history[f_id]], np.int32)
-                cv2.polylines(display_frame, [pts], False, color, 1)
+        draw_field_overlay(field_canvas, field_tracker.all_paths(), field_detections)
+        paste_field_overlay(display_frame, field_canvas)
 
         cv2.putText(display_frame, f"Scored FUEL: {State.total_scored_fuel}", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
 
         update_live_preview(display_frame, frame_count)
         out.write(display_frame)
+        yolo_out.write(yolo_debug_frame)
+        projection_out.write(projection_debug_frame)
 
         if max_frames > 0 and frame_count >= max_frames:
             break
 
     cap.release()
     out.release()
+    yolo_out.release()
+    projection_out.release()
     
+    State.robot_paths = [path.to_dict() for path in field_tracker.all_paths()]
+    State.robot_path_count = len(State.robot_paths)
+    State.ocr_assignments, State.ocr_status = run_robot_ocr_assignment(
+        State.robot_crops,
+        State.robot_alliances,
+        State.match_alliances,
+    )
     State.is_processing = False
     State.is_finished = True
 
@@ -627,7 +1127,10 @@ def api_status():
         "total_scored": State.total_scored_fuel,
         "current_fuel_count": State.current_fuel_count,
         "process_seconds": State.process_seconds,
-        "preview_available": State.preview_frame_jpeg is not None
+        "preview_available": State.preview_frame_jpeg is not None,
+        "model_status": State.model_status,
+        "robot_path_count": State.robot_path_count,
+        "ocr_status": State.ocr_status,
     })
 
 @app.route('/api/live_frame')
@@ -650,7 +1153,11 @@ def api_results():
     return jsonify({
         "scores": State.robot_scores,
         "crops": crops_b64,
-        "total_scored": State.total_scored_fuel
+        "total_scored": State.total_scored_fuel,
+        "robot_paths": State.robot_paths,
+        "ocr_assignments": State.ocr_assignments,
+        "ocr_status": State.ocr_status,
+        "match_alliances": State.match_alliances,
     })
 
 @app.route('/api/submit_attribution', methods=['POST'])

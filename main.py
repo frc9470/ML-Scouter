@@ -19,6 +19,39 @@ import os
 from collections import defaultdict
 from ultralytics import YOLO
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FUEL_INFERENCE_SIZE = 640
+ROBOT_INFERENCE_SIZE = 640
+
+def project_path(*parts):
+    return os.path.join(BASE_DIR, *parts)
+
+def model_names(model):
+    names = getattr(model, "names", {}) or {}
+    if isinstance(names, dict):
+        return {int(k): str(v) for k, v in names.items()}
+    return {index: str(name) for index, name in enumerate(names)}
+
+def is_coco_model(model):
+    names = {name.strip().lower() for name in model_names(model).values()}
+    return "person" in names and "sports ball" in names
+
+def class_filter_for(model, target):
+    if not is_coco_model(model):
+        return None
+    return [32] if target == "fuel" else [0]
+
+def load_model_with_fallback(primary_path, fallback_path, label):
+    try:
+        model = YOLO(primary_path)
+        names = ", ".join(f"{class_id}:{name}" for class_id, name in model_names(model).items())
+        print(f"Loaded {label} model: {primary_path} [{names}]")
+        return model
+    except Exception as error:
+        print(f"\n[WARNING] Could not load {label} model at {primary_path}: {error}")
+        print(f"Falling back to {fallback_path}.")
+        return YOLO(fallback_path)
+
 # --- GLOBAL VARIABLES FOR GUI ---
 roi_vertices = []
 window_name = "ROI Selection - FRC REBUILT"
@@ -152,25 +185,26 @@ def main():
     roi_poly = np.array(roi_vertices, np.int32).reshape((-1, 1, 2))
 
     # --- PHASE II: Model Initialization ---
-    # Load custom Roboflow models if they exist, otherwise fallback to standard YOLOv8n
-    try:
-        fuel_model = YOLO('fuel_best.pt')
-    except Exception:
-        print("\n[WARNING] Custom 'fuel_model.tflite' or 'robot_model.tflite' not found.")
-        print("Falling back to standard YOLOv8n for prototype demonstration.")
-        fuel_model = YOLO('yolov8n.pt')
-    
-    try:
-        robot_model = YOLO('runs_gpu/robot_seg/weights/best.pt')
-    except Exception:
-        print("\n[WARNING] Custom robot model not found.")
-        print("Falling back to standard YOLOv8n for prototype demonstration.")
-        robot_model = YOLO('yolov8n.pt')
+    # Prefer the uploaded custom models in models/. COCO is only a last-resort fallback.
+    fuel_model = load_model_with_fallback(
+        project_path("models", "flying_fuel_best.pt"),
+        project_path("yolo11n.pt"),
+        "fuel",
+    )
+    robot_primary_path = (
+        project_path("models", "autoscouter_ventura_best_2.pt")
+        if os.path.exists(project_path("models", "autoscouter_ventura_best_2.pt"))
+        else project_path("models", "robot_best.pt")
+    )
+    robot_model = load_model_with_fallback(
+        robot_primary_path,
+        project_path("yolo11n.pt"),
+        "robot",
+    )
 
     # Data structures for tracking and scoring
     fuel_history = defaultdict(list)
     robot_history = defaultdict(list)
-    airborne_fuel_ids = set()
     scored_fuel_ids = set()
     
     # Analytics
@@ -196,15 +230,23 @@ def main():
         cv2.polylines(display_frame, [roi_poly], True, (255, 255, 255), 2)
 
         # 1. Run inference and tracking on FUEL
-        # (For fallback yolov8n, classes=[32] filters for sports balls)
+        # For COCO fallback, classes=[32] filters for sports balls.
         fuel_results = fuel_model.track(
-            frame, persist=True, verbose=False, imgsz=320, classes=[32] if fuel_model.model_name == 'yolov8n.yaml' else None,
+            frame,
+            persist=True,
+            verbose=False,
+            imgsz=FUEL_INFERENCE_SIZE,
+            classes=class_filter_for(fuel_model, "fuel"),
         )
         
         # 2. Run inference and tracking on Robots
-        # (For fallback yolov8n, classes=[0] filters for people as a stand-in for robots)
+        # For COCO fallback, classes=[0] filters for people as a stand-in for robots.
         robot_results = robot_model.track(
-            frame, persist=True, verbose=False, imgsz=320, classes=[0] if robot_model.model_name == 'yolov8n.yaml' else None,
+            frame,
+            persist=True,
+            verbose=False,
+            imgsz=ROBOT_INFERENCE_SIZE,
+            classes=class_filter_for(robot_model, "robot"),
         )
 
         # --- Process Robots ---
@@ -246,47 +288,28 @@ def main():
                     'frame': frame_count, 'x': cx, 'y': cy, 'bbox': (fx1, fy1, fx2, fy2)
                 })
                 
-                # Check Airborne Status (Kinematic Filter)
-                if f_id not in airborne_fuel_ids:
-                    if is_airborne(fuel_history[f_id]):
-                        airborne_fuel_ids.add(f_id)
+                if f_id not in scored_fuel_ids:
+                    inside = cv2.pointPolygonTest(roi_poly, (cx, cy), False) >= 0
 
-                # Draw Red Box for FUEL ( Regardless of airborne status)
-                color = (0, 0, 255)
+                    if inside:
+                        scored_fuel_ids.add(f_id)
+                        total_scored_fuel += 1
+
+                        # PHASE III: Trajectory and Attribution trigger
+                        source_robot_id = calculate_trajectory_and_attribute(f_id, fuel_history[f_id], robot_history)
+                        if source_robot_id is not None:
+                            robot_scores[source_robot_id] += 1
+                            print(f"[SCORING EVENT] FUEL {f_id} scored by Robot {source_robot_id}!")
+                        else:
+                            print(f"[SCORING EVENT] FUEL {f_id} scored (Unattributed).")
+
+                color = (0, 255, 0) if f_id in scored_fuel_ids else (0, 0, 255)
+                status_text = "SCORED" if f_id in scored_fuel_ids else f"FUEL {f_id}"
                 cv2.rectangle(display_frame, (fx1, fy1), (fx2, fy2), color, 2)
-                
-                # Only process FUEL we consider airborne
-                if f_id in airborne_fuel_ids:
-                    color = (255, 0, 0) # Default Blue for tracking
-                    status_text = f"FUEL {f_id}"
-                    
-                    # Point-in-Polygon validation for scoring
-                    if f_id not in scored_fuel_ids:
-                        inside = cv2.pointPolygonTest(roi_poly, (cx, cy), False) >= 0
-                        
-                        if inside:
-                            scored_fuel_ids.add(f_id)
-                            total_scored_fuel += 1
-                            
-                            # PHASE III: Trajectory and Attribution trigger
-                            source_robot_id = calculate_trajectory_and_attribute(f_id, fuel_history[f_id], robot_history)
-                            if source_robot_id is not None:
-                                robot_scores[source_robot_id] += 1
-                                print(f"[SCORING EVENT] FUEL {f_id} scored by Robot {source_robot_id}!")
-                            else:
-                                print(f"[SCORING EVENT] FUEL {f_id} scored (Unattributed).")
-
-                    # Switch to Green if it has been marked as scored
-                    if f_id in scored_fuel_ids:
-                        color = (0, 255, 0) # Green
-                        status_text = "SCORED"
-                        
-                    cv2.rectangle(display_frame, (fx1, fy1), (fx2, fy2), color, 2)
-                    cv2.putText(display_frame, status_text, (fx1, fy1-10), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                    # Draw trajectory tail
-                    pts = np.array([[pt['x'], pt['y']] for pt in fuel_history[f_id]], np.int32)
-                    cv2.polylines(display_frame, [pts], False, color, 1)
+                cv2.putText(display_frame, status_text, (fx1, fy1-10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                pts = np.array([[pt['x'], pt['y']] for pt in fuel_history[f_id]], np.int32)
+                cv2.polylines(display_frame, [pts], False, color, 1)
 
         # Draw HUD
         cv2.putText(display_frame, f"Scored FUEL: {total_scored_fuel}", (30, 40), 
@@ -315,7 +338,6 @@ def main():
     cv2.destroyAllWindows()
     
     print("\n================ MATCH ANALYSIS COMPLETE ================")
-    print(f"Total Airborne FUEL Tracked: {len(airborne_fuel_ids)}")
     print(f"Total FUEL Successfully Scored in ROI: {total_scored_fuel}")
     print("---------------------------------------------------------")
     

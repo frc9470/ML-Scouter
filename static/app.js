@@ -1,6 +1,14 @@
 let points = [];
 let imgNativeWidth = 0;
 let imgNativeHeight = 0;
+let perspectiveConfig = null;
+let baselinePerspectiveConfig = null;
+let activeCalibrationView = null;
+const calibrationColors = {
+    full: '#e0b450',
+    left: '#50befa',
+    right: '#fa8c50'
+};
 
 document.addEventListener('DOMContentLoaded', () => {
     const canvas = document.getElementById('roi-canvas');
@@ -12,8 +20,29 @@ document.addEventListener('DOMContentLoaded', () => {
     const frameSecondsInput = document.getElementById('roi-frame-seconds');
     const processSecondsInput = document.getElementById('process-seconds');
     const frameError = document.getElementById('first-frame-error');
+    const calibrationStatus = document.getElementById('calibration-status');
     const currentYear = new Date().getFullYear();
     document.getElementById('tba-year').value = currentYear;
+
+    function cloneJson(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+
+    function loadPerspectiveConfig() {
+        fetch('/api/perspective_config')
+            .then(r => r.json())
+            .then(config => {
+                perspectiveConfig = config;
+                baselinePerspectiveConfig = cloneJson(config);
+                renderCalibrationControls();
+                drawPoints();
+            })
+            .catch(() => {
+                calibrationStatus.textContent = 'Could not load perspective calibration.';
+                calibrationStatus.className = 'source-status error';
+            });
+    }
+    loadPerspectiveConfig();
 
     // ──── Phase helpers ────
     function showPhase(id) {
@@ -28,6 +57,27 @@ document.addEventListener('DOMContentLoaded', () => {
         setFirstFrame(imageData);
         showPhase('phase-roi');
     }
+
+    // Check for pre-loaded sample video on startup
+    let sampleFrameData = null;
+    let sampleSeconds = 0;
+    fetch('/api/first_frame')
+        .then(r => r.json().then(d => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => {
+            if (ok && d.image) {
+                sampleFrameData = d.image;
+                sampleSeconds = d.seconds || 0;
+                const banner = document.getElementById('sample-banner');
+                banner.style.display = '';
+                const name = (d.video_path || '').split('/').pop() || 'sample video';
+                document.getElementById('sample-banner-name').textContent = name;
+            }
+        })
+        .catch(() => {});
+
+    document.getElementById('btn-use-sample').addEventListener('click', () => {
+        if (sampleFrameData) advanceToRoi(sampleFrameData, sampleSeconds);
+    });
 
     // ──── Combobox helper ────
     function createCombobox({ inputId, listboxId, spinnerId, onSearch, onSelect, debounceMs = 300 }) {
@@ -159,11 +209,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const redBadges = m.red.map(t => `<span class="combobox-badge red">${esc(t)}</span>`).join('');
             const blueBadges = m.blue.map(t => `<span class="combobox-badge blue">${esc(t)}</span>`).join('');
             return {
-                value: m.youtube_url,
-                text: m.label,
-                html: `<span class="combobox-option-label">${esc(m.label)}</span>` +
-                      (redBadges || blueBadges ? `<div class="combobox-teams">${redBadges}${blueBadges}</div>` : '')
-            };
+                            value: m.youtube_url,
+                            text: m.label,
+                            match: m,
+                            html: `<span class="combobox-option-label">${esc(m.label)}</span>` +
+                                  (redBadges || blueBadges ? `<div class="combobox-teams">${redBadges}${blueBadges}</div>` : '')
+                        };
         });
     }
 
@@ -182,11 +233,24 @@ document.addEventListener('DOMContentLoaded', () => {
         onSelect: (item) => {
             if (!item.value) { tbaStatus.textContent = 'No video URL for this match.'; tbaStatus.className = 'source-status error'; return; }
             document.getElementById('youtube-url').value = item.value;
-            loadYoutubeUrl(item.value);
+            setManualTeamInputs(item.match ? item.match.red : [], item.match ? item.match.blue : []);
+            loadYoutubeUrl(item.value, item.match);
         }
     });
 
     function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+    function parseTeamList(value) {
+        return (value || '')
+            .split(/[\s,;]+/)
+            .map(item => item.replace(/\D/g, ''))
+            .filter(Boolean);
+    }
+
+    function setManualTeamInputs(red, blue) {
+        document.getElementById('manual-red-teams').value = (red || []).join(', ');
+        document.getElementById('manual-blue-teams').value = (blue || []).join(', ');
+    }
 
     // ──── TBA config ────
     function refreshTbaConfigStatus() {
@@ -201,6 +265,57 @@ document.addEventListener('DOMContentLoaded', () => {
     function clearRoi() { points = []; drawPoints(); startButton.disabled = true; }
     function setFrameError(message) { frameError.textContent = message; frameError.classList.add('active'); }
     function clearFrameError() { frameError.textContent = ''; frameError.classList.remove('active'); }
+
+    function renderCalibrationControls() {
+        if (!perspectiveConfig || !perspectiveConfig.views) return;
+        Object.keys(calibrationColors).forEach(viewName => {
+            const view = perspectiveConfig.views[viewName];
+            const count = view && Array.isArray(view.source_points) ? view.source_points.length : 0;
+            const countEl = document.getElementById(`calibration-count-${viewName}`);
+            const button = document.querySelector(`.calibration-view[data-view="${viewName}"]`);
+            if (countEl) countEl.textContent = `${Math.min(4, count)}/4`;
+            if (button) {
+                button.classList.toggle('active', activeCalibrationView === viewName);
+                button.classList.toggle('complete', count === 4);
+            }
+        });
+    }
+
+    function setCalibrationStatus(message, type = 'active') {
+        calibrationStatus.textContent = message;
+        calibrationStatus.className = `source-status ${type}`;
+    }
+
+    function activeCalibrationLabel() {
+        if (!perspectiveConfig || !perspectiveConfig.views || !activeCalibrationView) return '';
+        return perspectiveConfig.views[activeCalibrationView].label || activeCalibrationView;
+    }
+
+    function nextCalibrationPointLabel(viewName) {
+        if (!perspectiveConfig || !perspectiveConfig.views || !perspectiveConfig.views[viewName]) return 'next point';
+        const view = perspectiveConfig.views[viewName];
+        const index = Array.isArray(view.source_points) ? view.source_points.length : 0;
+        const labels = Array.isArray(view.point_labels) ? view.point_labels : [];
+        return labels[index] || `point ${index + 1}`;
+    }
+
+    function savePerspectiveConfig() {
+        if (!perspectiveConfig) return Promise.resolve();
+        setCalibrationStatus('Saving calibration...', 'active');
+        return fetch('/api/set_perspective_config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(perspectiveConfig)
+        })
+            .then(r => r.json().then(d => ({ ok: r.ok, d })))
+            .then(({ ok, d }) => {
+                if (!ok) throw new Error(d.error || 'Could not save calibration');
+                perspectiveConfig = d.config;
+                baselinePerspectiveConfig = cloneJson(d.config);
+                renderCalibrationControls();
+                setCalibrationStatus('Calibration saved.', 'success');
+            });
+    }
 
     function setFirstFrame(image) {
         clearFrameError();
@@ -222,6 +337,20 @@ document.addEventListener('DOMContentLoaded', () => {
         const rect = canvas.getBoundingClientRect();
         const scaleX = imgNativeWidth / canvas.width, scaleY = imgNativeHeight / canvas.height;
         const x = (e.clientX - rect.left) * scaleX, y = (e.clientY - rect.top) * scaleY;
+        if (activeCalibrationView && perspectiveConfig && perspectiveConfig.views[activeCalibrationView]) {
+            const view = perspectiveConfig.views[activeCalibrationView];
+            view.source_points = Array.isArray(view.source_points) ? view.source_points.slice(0, 4) : [];
+            if (view.source_points.length >= 4) view.source_points = [];
+            view.source_points.push([Math.round(x), Math.round(y)]);
+            renderCalibrationControls();
+            drawPoints();
+            const remaining = 4 - view.source_points.length;
+            setCalibrationStatus(
+                remaining > 0 ? `${activeCalibrationLabel()}: click ${nextCalibrationPointLabel(activeCalibrationView)}.` : `${activeCalibrationLabel()} landmarks set.`,
+                remaining > 0 ? 'active' : 'success'
+            );
+            return;
+        }
         points.push([Math.round(x), Math.round(y)]);
         drawPoints();
         if (points.length >= 3) startButton.disabled = false;
@@ -231,6 +360,34 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         if (!imgNativeWidth || !imgNativeHeight) return;
         const scaleX = canvas.width / imgNativeWidth, scaleY = canvas.height / imgNativeHeight;
+        if (perspectiveConfig && perspectiveConfig.views) {
+            Object.keys(calibrationColors).forEach(viewName => {
+                const view = perspectiveConfig.views[viewName];
+                const viewPoints = view && Array.isArray(view.source_points) ? view.source_points : [];
+                if (!viewPoints.length) return;
+                ctx.beginPath();
+                ctx.strokeStyle = calibrationColors[viewName];
+                ctx.lineWidth = activeCalibrationView === viewName ? 3 : 2;
+                viewPoints.forEach((pt, i) => {
+                    const x = pt[0] * scaleX, y = pt[1] * scaleY;
+                    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                });
+                if (viewPoints.length === 4) ctx.lineTo(viewPoints[0][0] * scaleX, viewPoints[0][1] * scaleY);
+                ctx.stroke();
+                viewPoints.forEach((pt, i) => {
+                    const x = pt[0] * scaleX, y = pt[1] * scaleY;
+                    ctx.beginPath();
+                    ctx.fillStyle = calibrationColors[viewName];
+                    ctx.arc(x, y, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = '#0b0b0d';
+                    ctx.font = '600 10px Inter, sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(String(i + 1), x, y);
+                });
+            });
+        }
         if (points.length > 0) {
             ctx.beginPath(); ctx.strokeStyle = '#00ffff'; ctx.lineWidth = 2;
             points.forEach((pt, i) => { const x = pt[0] * scaleX, y = pt[1] * scaleY; if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); ctx.fillStyle = '#ff0000'; });
@@ -241,6 +398,47 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     document.getElementById('btn-clear').addEventListener('click', () => clearRoi());
+
+    document.querySelectorAll('.calibration-view').forEach(button => {
+        button.addEventListener('click', () => {
+            activeCalibrationView = button.dataset.view;
+            const view = perspectiveConfig && perspectiveConfig.views ? perspectiveConfig.views[activeCalibrationView] : null;
+            if (view) view.source_points = [];
+            renderCalibrationControls();
+            drawPoints();
+            setCalibrationStatus(`${activeCalibrationLabel()}: click ${nextCalibrationPointLabel(activeCalibrationView)}.`, 'active');
+        });
+    });
+
+    document.getElementById('btn-calibration-done').addEventListener('click', () => {
+        activeCalibrationView = null;
+        renderCalibrationControls();
+        drawPoints();
+        setCalibrationStatus('ROI editing enabled.', 'active');
+    });
+
+    document.getElementById('btn-clear-calibration-view').addEventListener('click', () => {
+        if (!activeCalibrationView || !perspectiveConfig || !perspectiveConfig.views[activeCalibrationView]) return;
+        perspectiveConfig.views[activeCalibrationView].source_points = [];
+        renderCalibrationControls();
+        drawPoints();
+        setCalibrationStatus(`${activeCalibrationLabel()} cleared.`, 'active');
+    });
+
+    document.getElementById('btn-reset-calibration').addEventListener('click', () => {
+        if (!baselinePerspectiveConfig) return;
+        perspectiveConfig = cloneJson(baselinePerspectiveConfig);
+        activeCalibrationView = null;
+        renderCalibrationControls();
+        drawPoints();
+        setCalibrationStatus('Calibration reset.', 'active');
+    });
+
+    document.getElementById('btn-save-calibration').addEventListener('click', () => {
+        savePerspectiveConfig().catch(error => {
+            setCalibrationStatus(error.message || 'Could not save calibration.', 'error');
+        });
+    });
 
     // ──── Back button (ROI → Source) ────
     document.getElementById('btn-back-source').addEventListener('click', () => showPhase('phase-source'));
@@ -265,11 +463,18 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('btn-frame-forward').addEventListener('click', () => loadFrameAtSeconds((Number(frameSecondsInput.value) || 0) + 5));
 
     // ──── YouTube loader ────
-    function loadYoutubeUrl(url) {
+    function loadYoutubeUrl(url, matchData = null) {
         if (!url) { sourceStatus.textContent = 'Paste a YouTube URL first.'; sourceStatus.className = 'source-status error'; return; }
         sourceStatus.textContent = 'Downloading video…'; sourceStatus.className = 'source-status active';
         document.getElementById('btn-load-youtube').disabled = true;
-        fetch('/api/set_video_source', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ youtube_url: url }) })
+        const payload = { youtube_url: url };
+        payload.red = parseTeamList(document.getElementById('manual-red-teams').value);
+        payload.blue = parseTeamList(document.getElementById('manual-blue-teams').value);
+        if (matchData) {
+            payload.red = payload.red.length ? payload.red : (matchData.red || []);
+            payload.blue = payload.blue.length ? payload.blue : (matchData.blue || []);
+        }
+        fetch('/api/set_video_source', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
             .then(r => r.json().then(d => ({ ok: r.ok, d })))
             .then(({ ok, d }) => {
                 if (!ok) { sourceStatus.textContent = d.error || 'Could not load video.'; sourceStatus.className = 'source-status error'; return; }
@@ -302,9 +507,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // ──── Start Processing ────
     startButton.addEventListener('click', () => {
         const processSeconds = Math.max(0, Number(processSecondsInput.value) || 0);
-        fetch('/api/set_roi', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ points, process_seconds: processSeconds }) })
+        savePerspectiveConfig()
+            .then(() => fetch('/api/set_roi', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ points, process_seconds: processSeconds }) }))
             .then(r => r.json()).then(d => {
                 if (d.success) { showPhase('phase-processing'); pollStatus(); }
+            })
+            .catch(error => {
+                setCalibrationStatus(error.message || 'Could not start analysis.', 'error');
             });
     });
 
@@ -316,6 +525,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('progress-bar').style.width = percent + '%';
                 document.getElementById('progress-text').innerText = `${percent}% (${d.progress}/${d.total_frames})`;
                 if (d.current_fuel_count !== undefined) document.getElementById('live-fuel-count').innerText = d.current_fuel_count;
+                if (d.robot_path_count !== undefined) document.getElementById('live-robot-path-count').innerText = d.robot_path_count;
                 if (d.preview_available) {
                     const lp = document.getElementById('live-preview');
                     lp.src = '/api/live_frame?t=' + Date.now(); lp.classList.add('active');
@@ -326,6 +536,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     showPhase('phase-playback');
                     document.getElementById('video-source').src = '/static/output.mp4?t=' + Date.now();
                     document.getElementById('video-player').load();
+                    document.getElementById('yolo-debug-source').src = '/static/yolo_debug.mp4?t=' + Date.now();
+                    document.getElementById('yolo-debug-player').load();
+                    document.getElementById('projection-source').src = '/static/robot_projection.mp4?t=' + Date.now();
+                    document.getElementById('projection-player').load();
                 }
             });
         }, 1000);
@@ -336,9 +550,19 @@ document.addEventListener('DOMContentLoaded', () => {
         showPhase('phase-results');
         fetch('/api/results').then(r => r.json()).then(d => {
             const grid = document.getElementById('robot-grid');
+            grid.innerHTML = '';
+            const status = document.getElementById('ocr-status');
+            status.className = d.ocr_status && d.ocr_status.enabled ? 'source-status success' : 'source-status active';
+            status.textContent = d.ocr_status ? d.ocr_status.message : 'OCR status unavailable.';
             Object.keys(d.crops).forEach(r_id => {
+                const ocr = (d.ocr_assignments || {})[r_id] || {};
+                const suggestedTeam = ocr.team || '';
+                const ocrText = ocr.text ? `OCR ${esc(ocr.text)}` : 'No OCR text';
+                const candidate = ocr.candidate_team ? ` · closest ${ocr.candidate_team}` : '';
+                const score = ocr.score !== undefined ? ` · match ${ocr.score}` : '';
+                const alliance = ocr.alliance ? ` · ${esc(ocr.alliance)}` : '';
                 const div = document.createElement('div'); div.className = 'robot-card';
-                div.innerHTML = `<img src="data:image/jpeg;base64,${d.crops[r_id]}" /><p style="margin:0 0 8px 0; color:var(--text-muted); font-size:0.82rem">ID ${r_id}</p><p style="margin:0 0 8px 0; color:var(--accent); font-weight:600; font-size:0.9rem">${d.scores[r_id] || 0} scored</p><input type="number" class="input-field" data-id="${r_id}" placeholder="Team #" />`;
+                div.innerHTML = `<img src="data:image/jpeg;base64,${d.crops[r_id]}" /><p style="margin:0 0 8px 0; color:var(--text-muted); font-size:0.82rem">ID ${r_id}${alliance}</p><p style="margin:0 0 8px 0; color:var(--accent); font-weight:600; font-size:0.9rem">${d.scores[r_id] || 0} scored</p><p class="ocr-meta">${ocrText}${candidate}${score}</p><input type="number" class="input-field" data-id="${r_id}" placeholder="Team #" value="${suggestedTeam}" />`;
                 grid.appendChild(div);
             });
         });
