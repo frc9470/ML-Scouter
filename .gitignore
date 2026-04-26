@@ -1,6 +1,4 @@
 # Model related
-*.pt
-*.tflite
 *.mp4
 runs_gpu/*
 runs/*
