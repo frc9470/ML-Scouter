@@ -86,7 +86,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--model",
-        default="yolo11n.pt",
+        default="yolo11s.pt",
         help="Base weights when not using --resume (segment model; matches polygon labels).",
     )
     parser.add_argument(

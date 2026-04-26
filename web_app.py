@@ -54,7 +54,7 @@ TBA_BASE_URL = "https://www.thebluealliance.com/api/v3"
 PERSPECTIVE_CONFIG_PATH = project_path("data", "perspective_config.json")
 FUEL_INFERENCE_SIZE = 1920
 ROBOT_INFERENCE_SIZE = 640
-YOLO_DEBUG_SIZE = 640
+YOLO_DEBUG_SIZE = 1920
 TRACKER_CONFIGS = {
     "botsort": {"label": "BoT-SORT", "config": "botsort.yaml"},
     "bytetrack": {"label": "ByteTrack", "config": "bytetrack.yaml"},

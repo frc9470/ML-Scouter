@@ -11,6 +11,9 @@ datasets/
 !.env.example
 .DS_Store
 
+# Configuration-related
+top_view_crop.json
+
 __pycache__/
 *.pyc
 yolo11n.pt
