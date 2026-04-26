@@ -1,3 +1,19 @@
+"""
+web_app.py
+
+An all-in-one monolith file containing most of the code to run a server
+analyzing and serving robot-specific shot counting metrics over a web
+application.
+
+Usage:
+`conda activate frc-ai-scouter`
+`python web_app.py --fuel-model path/to/model.pt \\
+    --robot-model path/to/model.pt
+
+The video to be analyzed is automatically selected in the web application
+interface.
+"""
+
 import os
 import cv2
 import base64
@@ -36,7 +52,7 @@ os.makedirs(project_path('data'), exist_ok=True)
 
 TBA_BASE_URL = "https://www.thebluealliance.com/api/v3"
 PERSPECTIVE_CONFIG_PATH = project_path("data", "perspective_config.json")
-FUEL_INFERENCE_SIZE = 640
+FUEL_INFERENCE_SIZE = 1920
 ROBOT_INFERENCE_SIZE = 640
 YOLO_DEBUG_SIZE = 640
 TRACKER_CONFIGS = {
@@ -278,15 +294,15 @@ def draw_yolo_debug_frame(frame, fuel_boxes, fuel_ids, fuel_confs, robot_boxes, 
         x1, y1, x2, y2 = map_box(box)
         color = (0, 255, 255)
         cv2.rectangle(debug_frame, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(
-            debug_frame,
-            f"fuel {int(fuel_id)} {confidence:.2f}",
-            (x1, max(16, y1 - 6)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            color,
-            1,
-        )
+        # cv2.putText(
+        #     debug_frame,
+        #     f"fuel {int(fuel_id)} {confidence:.2f}",
+        #     (x1, max(16, y1 - 6)),
+        #     cv2.FONT_HERSHEY_SIMPLEX,
+        #     0.45,
+        #     color,
+        #     1,
+        # )
 
     for box, robot_id, confidence, class_id in zip(robot_boxes, robot_ids, robot_confs, robot_classes):
         class_name = robot_names.get(int(class_id), "robot")
