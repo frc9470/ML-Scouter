@@ -15,6 +15,20 @@ document.addEventListener('DOMContentLoaded', () => {
     const currentYear = new Date().getFullYear();
     document.getElementById('tba-year').value = currentYear;
 
+    // ──── Phase helpers ────
+    function showPhase(id) {
+        document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
+        document.getElementById(id).classList.add('active');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function advanceToRoi(imageData, seconds) {
+        setFrameSeconds(seconds || 0);
+        clearRoi();
+        setFirstFrame(imageData);
+        showPhase('phase-roi');
+    }
+
     // ──── Combobox helper ────
     function createCombobox({ inputId, listboxId, spinnerId, onSearch, onSelect, debounceMs = 300 }) {
         const input = document.getElementById(inputId);
@@ -197,14 +211,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function setFrameSeconds(seconds) { frameSecondsInput.value = Math.max(0, Number(seconds) || 0).toFixed(1); }
 
-    function loadFirstFrame() {
-        fetch('/api/first_frame').then(r => r.json().then(d => ({ ok: r.ok, d }))).then(({ ok, d }) => {
-            if (!ok) { setFrameError(d.error || 'Could not load the first video frame.'); return; }
-            if (d.image) { setFrameSeconds(d.seconds || 0); setFirstFrame(d.image); }
-        }).catch(() => setFrameError('Could not connect to the video frame endpoint.'));
-    }
-    loadFirstFrame();
-
     function resizeCanvas() {
         const img = document.getElementById('first-frame');
         canvas.width = img.clientWidth; canvas.height = img.clientHeight; drawPoints();
@@ -236,18 +242,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('btn-clear').addEventListener('click', () => clearRoi());
 
+    // ──── Back button (ROI → Source) ────
+    document.getElementById('btn-back-source').addEventListener('click', () => showPhase('phase-source'));
+
     // ──── Frame navigation ────
     function loadFrameAtSeconds(seconds) {
-        frameStatus.textContent = 'Loading ROI frame…'; frameStatus.className = 'source-status active';
+        frameStatus.textContent = 'Loading frame…'; frameStatus.className = 'source-status active';
         document.getElementById('btn-load-frame').disabled = true; startButton.disabled = true;
         fetch('/api/frame_at', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seconds }) })
             .then(r => r.json().then(d => ({ ok: r.ok, d })))
             .then(({ ok, d }) => {
-                if (!ok) { frameStatus.textContent = d.error || 'Could not load ROI frame.'; frameStatus.className = 'source-status error'; return; }
+                if (!ok) { frameStatus.textContent = d.error || 'Could not load frame.'; frameStatus.className = 'source-status error'; return; }
                 setFrameSeconds(d.seconds); clearRoi(); setFirstFrame(d.image);
-                frameStatus.textContent = `ROI frame loaded at ${Number(d.seconds).toFixed(1)}s.`; frameStatus.className = 'source-status success';
+                frameStatus.textContent = `Frame at ${Number(d.seconds).toFixed(1)}s`; frameStatus.className = 'source-status success';
             })
-            .catch(() => { frameStatus.textContent = 'Could not connect to the ROI frame endpoint.'; frameStatus.className = 'source-status error'; })
+            .catch(() => { frameStatus.textContent = 'Connection error.'; frameStatus.className = 'source-status error'; })
             .finally(() => { document.getElementById('btn-load-frame').disabled = false; });
     }
 
@@ -259,16 +268,15 @@ document.addEventListener('DOMContentLoaded', () => {
     function loadYoutubeUrl(url) {
         if (!url) { sourceStatus.textContent = 'Paste a YouTube URL first.'; sourceStatus.className = 'source-status error'; return; }
         sourceStatus.textContent = 'Downloading video…'; sourceStatus.className = 'source-status active';
-        document.getElementById('btn-load-youtube').disabled = true; startButton.disabled = true;
+        document.getElementById('btn-load-youtube').disabled = true;
         fetch('/api/set_video_source', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ youtube_url: url }) })
             .then(r => r.json().then(d => ({ ok: r.ok, d })))
             .then(({ ok, d }) => {
-                if (!ok) { sourceStatus.textContent = d.error || 'Could not load YouTube video.'; sourceStatus.className = 'source-status error'; return; }
-                sourceStatus.textContent = 'Video loaded. Pick an ROI frame or select the ROI on this frame.'; sourceStatus.className = 'source-status success';
-                frameStatus.textContent = 'Title card? Jump forward a few seconds, then load the ROI frame.'; frameStatus.className = 'source-status active';
-                setFrameSeconds(d.seconds || 0); clearRoi(); setFirstFrame(d.image);
+                if (!ok) { sourceStatus.textContent = d.error || 'Could not load video.'; sourceStatus.className = 'source-status error'; return; }
+                sourceStatus.textContent = 'Video loaded.'; sourceStatus.className = 'source-status success';
+                advanceToRoi(d.image, d.seconds || 0);
             })
-            .catch(() => { sourceStatus.textContent = 'Could not connect to the video source endpoint.'; sourceStatus.className = 'source-status error'; })
+            .catch(() => { sourceStatus.textContent = 'Connection error.'; sourceStatus.className = 'source-status error'; })
             .finally(() => { document.getElementById('btn-load-youtube').disabled = false; });
     }
 
@@ -279,28 +287,28 @@ document.addEventListener('DOMContentLoaded', () => {
         const keyInput = document.getElementById('tba-auth-key');
         const key = keyInput.value.trim();
         if (!key) { tbaStatus.textContent = 'Paste a TBA API key first.'; tbaStatus.className = 'source-status error'; return; }
-        tbaStatus.textContent = 'Saving TBA key…'; tbaStatus.className = 'source-status active';
+        tbaStatus.textContent = 'Saving…'; tbaStatus.className = 'source-status active';
         document.getElementById('btn-save-tba-key').disabled = true;
         fetch('/api/tba/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ auth_key: key }) })
             .then(r => r.json().then(d => ({ ok: r.ok, d })))
             .then(({ ok, d }) => {
-                if (!ok) { tbaStatus.textContent = d.error || 'Could not save TBA key.'; tbaStatus.className = 'source-status error'; return; }
+                if (!ok) { tbaStatus.textContent = d.error || 'Could not save key.'; tbaStatus.className = 'source-status error'; return; }
                 keyInput.value = ''; tbaStatus.textContent = 'TBA key saved.'; tbaStatus.className = 'source-status success';
             })
-            .catch(() => { tbaStatus.textContent = 'Could not connect to the TBA key endpoint.'; tbaStatus.className = 'source-status error'; })
+            .catch(() => { tbaStatus.textContent = 'Connection error.'; tbaStatus.className = 'source-status error'; })
             .finally(() => { document.getElementById('btn-save-tba-key').disabled = false; });
     });
 
-    // 2. Start Processing
+    // ──── Start Processing ────
     startButton.addEventListener('click', () => {
         const processSeconds = Math.max(0, Number(processSecondsInput.value) || 0);
         fetch('/api/set_roi', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ points, process_seconds: processSeconds }) })
             .then(r => r.json()).then(d => {
-                if (d.success) { document.getElementById('phase-roi').classList.remove('active'); document.getElementById('phase-processing').classList.add('active'); pollStatus(); }
+                if (d.success) { showPhase('phase-processing'); pollStatus(); }
             });
     });
 
-    // 3. Poll Backend
+    // ──── Poll Backend ────
     function pollStatus() {
         const interval = setInterval(() => {
             fetch('/api/status').then(r => r.json()).then(d => {
@@ -315,8 +323,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 if (d.is_finished) {
                     clearInterval(interval);
-                    document.getElementById('phase-processing').classList.remove('active');
-                    document.getElementById('phase-playback').classList.add('active');
+                    showPhase('phase-playback');
                     document.getElementById('video-source').src = '/static/output.mp4?t=' + Date.now();
                     document.getElementById('video-player').load();
                 }
@@ -324,36 +331,31 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 1000);
     }
 
-    // 4. Continue to attribution
-    document.getElementById('btn-continue-attribution').addEventListener('click', () => showResults());
-
-    // 5. Show Robot Attribution Screen
-    function showResults() {
-        document.getElementById('phase-playback').classList.remove('active');
-        document.getElementById('phase-results').classList.add('active');
+    // ──── Attribution ────
+    document.getElementById('btn-continue-attribution').addEventListener('click', () => {
+        showPhase('phase-results');
         fetch('/api/results').then(r => r.json()).then(d => {
             const grid = document.getElementById('robot-grid');
             Object.keys(d.crops).forEach(r_id => {
                 const div = document.createElement('div'); div.className = 'robot-card';
-                div.innerHTML = `<img src="data:image/jpeg;base64,${d.crops[r_id]}" /><p style="margin:0 0 10px 0; color:#94a3b8">Tracker ID: ${r_id}</p><p style="margin:0 0 10px 0; color:#ec4899; font-weight:bold">${d.scores[r_id] || 0} Points Scored</p><input type="number" class="input-field" data-id="${r_id}" placeholder="Enter Team #" />`;
+                div.innerHTML = `<img src="data:image/jpeg;base64,${d.crops[r_id]}" /><p style="margin:0 0 8px 0; color:var(--text-muted); font-size:0.82rem">ID ${r_id}</p><p style="margin:0 0 8px 0; color:var(--accent); font-weight:600; font-size:0.9rem">${d.scores[r_id] || 0} scored</p><input type="number" class="input-field" data-id="${r_id}" placeholder="Team #" />`;
                 grid.appendChild(div);
             });
         });
-    }
+    });
 
-    // 6. Submit Scores
+    // ──── Final Report ────
     document.getElementById('btn-submit-scores').addEventListener('click', () => {
         const inputs = document.querySelectorAll('.input-field');
         const mapping = {};
         inputs.forEach(input => { if (input.value) mapping[input.dataset.id] = input.value; });
         fetch('/api/submit_attribution', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mapping }) })
             .then(r => r.json()).then(d => {
-                document.getElementById('phase-results').classList.remove('active');
-                document.getElementById('phase-final').classList.add('active');
+                showPhase('phase-final');
                 const container = document.getElementById('final-scores-container');
                 let html = '';
                 Object.keys(d.final_scores).sort((a, b) => d.final_scores[b] - d.final_scores[a]).forEach(team => {
-                    html += `<div class="score-row"><span>Team ${team}</span><span style="color:var(--accent); font-weight:bold">${d.final_scores[team]} FUEL</span></div>`;
+                    html += `<div class="score-row"><span>Team ${team}</span><span style="color:var(--accent); font-weight:600">${d.final_scores[team]} fuel</span></div>`;
                 });
                 html += `<div class="score-row" style="opacity:0.7"><span>Unattributed / Manual</span><span>${d.unattributed}</span></div>`;
                 container.innerHTML = html;

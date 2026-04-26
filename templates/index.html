@@ -3,53 +3,50 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FRC AI Scouter</title>
+    <title>ML-Scouter — FRC Match Analysis</title>
     <link rel="stylesheet" href="/static/style.css">
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 </head>
 <body>
-    <div class="background-glow"></div>
     <div class="container">
         <header>
-            <h1>FRC <span>AI</span> Scouter</h1>
-            <p>Advanced Kinematic Tracking & Scoring Pipeline</p>
+            <h1>ML-<span>Scouter</span></h1>
+            <p>FRC Match Analysis Pipeline</p>
         </header>
 
-        <!-- Phase 1: ROI Selection -->
-        <div id="phase-roi" class="card active">
-            <h2>1. Define HUB Funnel ROI</h2>
-            <p>Click on the video frame to trace the hexagonal HUB funnel. You need at least 3 points to create a valid detection zone.</p>
+        <!-- Phase 1: Select Match Video -->
+        <div id="phase-source" class="card active">
+            <h2>1 &middot; Select Match Video</h2>
+            <p>Paste a YouTube URL directly, or search for a match via The Blue Alliance.</p>
 
             <div class="source-panel">
-                <input id="youtube-url" class="source-input" type="url" placeholder="Paste a YouTube match video URL" />
-                <button id="btn-load-youtube" class="btn secondary">Load YouTube Video</button>
+                <input id="youtube-url" class="source-input" type="url" placeholder="YouTube match video URL" />
+                <button id="btn-load-youtube" class="btn secondary">Load Video</button>
             </div>
             <p id="source-status" class="source-status"></p>
 
             <div class="picker-panel">
                 <div class="picker-row">
                     <input id="tba-auth-key" class="source-input" type="password" placeholder="TBA API key" autocomplete="off" />
-                    <button id="btn-save-tba-key" class="btn secondary" type="button">Save TBA Key</button>
+                    <button id="btn-save-tba-key" class="btn secondary" type="button">Save Key</button>
                 </div>
 
-                <!-- Event search dropdown -->
                 <div class="picker-row">
                     <input id="tba-year" class="frame-input" type="number" min="1992" step="1" value="2026" aria-label="TBA event year" />
                     <div class="combobox" id="event-combobox">
                         <div class="combobox-input-wrap">
                             <svg class="combobox-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.45 4.39l4.26 4.26a.75.75 0 11-1.06 1.06l-4.26-4.26A7 7 0 012 9z" clip-rule="evenodd"/></svg>
-                            <input id="tba-event-query" class="combobox-input" type="search" placeholder="Search TBA events…" autocomplete="off" />
+                            <input id="tba-event-query" class="combobox-input" type="search" placeholder="Search events…" autocomplete="off" />
                             <div class="combobox-spinner" id="event-spinner"></div>
                         </div>
                         <ul class="combobox-listbox" id="event-listbox" role="listbox"></ul>
                     </div>
                 </div>
 
-                <!-- Match search dropdown -->
                 <div class="picker-row">
                     <div class="combobox combobox-full" id="match-combobox">
                         <div class="combobox-input-wrap">
-                            <svg class="combobox-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M2.5 7.5a5 5 0 0110 0 5 5 0 01-10 0zm5-6.5a6.5 6.5 0 105.25 10.37l3.94 3.94a.75.75 0 001.06-1.06l-3.94-3.94A6.5 6.5 0 007.5 1z"/></svg>
+                            <svg class="combobox-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.45 4.39l4.26 4.26a.75.75 0 11-1.06 1.06l-4.26-4.26A7 7 0 012 9z" clip-rule="evenodd"/></svg>
                             <input id="tba-match-query" class="combobox-input" type="search" placeholder="Select an event first…" autocomplete="off" disabled />
                             <div class="combobox-spinner" id="match-spinner"></div>
                         </div>
@@ -58,79 +55,82 @@
                 </div>
             </div>
             <p id="tba-status" class="source-status"></p>
+        </div>
+
+        <!-- Phase 2: Define ROI -->
+        <div id="phase-roi" class="card">
+            <h2>2 &middot; Define Detection Zone</h2>
+            <p>Click on the frame to trace the scoring area. At least 3 points required.</p>
 
             <div class="frame-panel">
-                <button id="btn-frame-back" class="btn secondary" type="button">-5s</button>
+                <button id="btn-frame-back" class="btn secondary" type="button">−5s</button>
                 <input id="roi-frame-seconds" class="frame-input" type="number" min="0" step="0.5" value="0" aria-label="ROI frame time in seconds" />
-                <button id="btn-load-frame" class="btn secondary" type="button">Load ROI Frame</button>
+                <button id="btn-load-frame" class="btn secondary" type="button">Load Frame</button>
                 <button id="btn-frame-forward" class="btn secondary" type="button">+5s</button>
             </div>
             <p id="frame-status" class="source-status"></p>
 
             <div class="frame-panel">
-                <label class="field-label" for="process-seconds">Analyze seconds</label>
+                <label class="field-label" for="process-seconds">Duration</label>
                 <input id="process-seconds" class="frame-input" type="number" min="0" step="1" value="20" />
-                <span class="field-hint">Use 0 for full video.</span>
+                <span class="field-hint">seconds &middot; 0 = full video</span>
             </div>
-            
+
             <div class="canvas-container">
                 <img id="first-frame" src="" alt="First Frame" />
                 <canvas id="roi-canvas"></canvas>
                 <div id="first-frame-error" class="frame-error"></div>
             </div>
-            
+
             <div class="actions">
+                <button id="btn-back-source" class="btn secondary">Back</button>
                 <button id="btn-clear" class="btn secondary">Clear Points</button>
-                <button id="btn-start" class="btn primary" disabled>Start Match Analysis</button>
+                <button id="btn-start" class="btn primary" disabled>Start Analysis</button>
             </div>
         </div>
 
-        <!-- Phase 2: Processing Stream -->
+        <!-- Phase 3: Processing -->
         <div id="phase-processing" class="card">
-            <h2>2. Analyzing Match Video</h2>
-            <p>Running YOLO inference and tracking... This may take a few minutes depending on your GPU.</p>
-            <div class="progress-bar-container" style="width:100%; height:20px; background:#1e293b; border-radius:10px; overflow:hidden; margin: 2rem 0;">
-                <div id="progress-bar" style="width:0%; height:100%; background:var(--primary); transition: width 0.5s;"></div>
+            <h2>3 &middot; Analyzing</h2>
+            <p>Running inference and tracking. This may take a few minutes depending on hardware.</p>
+            <div style="width:100%; height:6px; background:var(--surface-2); border-radius:3px; overflow:hidden; margin:1.5rem 0;">
+                <div id="progress-bar" style="width:0%; height:100%; background:var(--accent); transition:width 0.5s;"></div>
             </div>
-            <p id="progress-text" style="text-align:center; font-weight:bold; font-size:1.5rem; color:var(--accent);">0%</p>
+            <p id="progress-text" style="text-align:center; font-weight:700; font-size:1.1rem; color:var(--text); font-variant-numeric:tabular-nums;">0%</p>
 
             <div class="live-preview-container">
-                <img id="live-preview" alt="Live annotated analysis preview" />
-                <div id="live-preview-placeholder">Live annotated preview will appear after processing starts.</div>
+                <img id="live-preview" alt="Live annotated preview" />
+                <div id="live-preview-placeholder">Live preview will appear once processing begins.</div>
             </div>
-            
-            <div class="stats-bar" style="margin-top: 1.5rem;">
-                <div class="stat-box" style="text-align: center;">
-                    <h3>Live FUEL Detected</h3>
-                    <p id="live-fuel-count" style="font-size:2.5rem; margin-top:0.2rem;">0</p>
+
+            <div class="stats-bar" style="margin-top:1rem;">
+                <div class="stat-box" style="text-align:center;">
+                    <h3>Fuel Detected</h3>
+                    <p id="live-fuel-count">0</p>
                 </div>
             </div>
         </div>
 
-        <!-- Phase 3: Playback -->
+        <!-- Phase 4: Playback -->
         <div id="phase-playback" class="card">
-            <h2>3. Match Playback</h2>
-            <p>Analysis complete! You can now watch the resulting video seamlessly in your browser.</p>
+            <h2>4 &middot; Playback</h2>
+            <p>Analysis complete. Review the annotated video below.</p>
             <div class="stream-container">
-                <video id="video-player" controls style="width:100%; border-radius:16px;">
+                <video id="video-player" controls style="width:100%; border-radius:var(--radius);">
                     <source id="video-source" src="" type="video/mp4">
                     Your browser does not support the video tag.
                 </video>
             </div>
             <div class="actions">
-                <button id="btn-continue-attribution" class="btn primary">Continue to Score Attribution</button>
+                <button id="btn-continue-attribution" class="btn primary">Continue to Attribution</button>
             </div>
         </div>
 
-        <!-- Phase 4: Attribution -->
+        <!-- Phase 5: Attribution -->
         <div id="phase-results" class="card">
-            <h2>4. Score Attribution</h2>
-            <p>Identify the robots below to finalize scores.</p>
-            
-            <div id="robot-grid" class="grid">
-                <!-- Dynamically populated by JS -->
-            </div>
-            
+            <h2>5 &middot; Score Attribution</h2>
+            <p>Assign team numbers to each tracked robot.</p>
+            <div id="robot-grid" class="grid"></div>
             <div class="actions">
                 <button id="btn-submit-scores" class="btn primary">Finalize Report</button>
             </div>
@@ -138,11 +138,10 @@
 
         <!-- Final Report -->
         <div id="phase-final" class="card">
-            <h2>Final Match Report</h2>
+            <h2>Match Report</h2>
             <div id="final-scores-container"></div>
-            <br>
-            <div class="actions">
-                <button class="btn secondary" onclick="location.reload()">Start New Match</button>
+            <div class="actions" style="margin-top:1rem;">
+                <button class="btn secondary" onclick="location.reload()">New Analysis</button>
             </div>
         </div>
     </div>
